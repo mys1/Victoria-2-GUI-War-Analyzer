@@ -1,0 +1,5815 @@
+"""Victoria 2 War Analyzer - Enhanced GUI tool for analyzing wars from Victoria 2 save files."""
+
+import os
+import re
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from PIL import Image, ImageTk, ImageDraw, ImageFont
+
+
+# ============================================================================
+# CONSTANTS
+# ============================================================================
+
+WINDOW_WIDTH = 684
+WINDOW_HEIGHT = 641
+
+# War list dimensions
+WAR_LIST_X = 43
+WAR_LIST_Y = 60
+WAR_LIST_WIDTH = 620
+WAR_LIST_HEIGHT = 224
+SCROLLBAR_WIDTH = 16
+
+# Filter list dimensions
+FILTER_LIST_X = 27
+FILTER_LIST_Y = WAR_LIST_Y + WAR_LIST_HEIGHT + 44
+FILTER_LIST_WIDTH = 639
+FILTER_LIST_HEIGHT = 287
+
+# Sort button dimensions
+SORT_BUTTON_X = FILTER_LIST_X - 1
+SORT_BUTTON_Y = WAR_LIST_Y + WAR_LIST_HEIGHT + 23
+SORT_BUTTON_WIDTH = 166
+SORT_BUTTON_HEIGHT = 25
+
+# Additional sort buttons
+SORT_BUTTON_42_X = SORT_BUTTON_X + SORT_BUTTON_WIDTH
+SORT_BUTTON_42_Y = SORT_BUTTON_Y
+SORT_BUTTON_42_WIDTH = 42
+SORT_BUTTON_42_HEIGHT = 20
+
+SORT_BUTTON_24_X = SORT_BUTTON_42_X + SORT_BUTTON_42_WIDTH
+SORT_BUTTON_24_Y = SORT_BUTTON_Y
+SORT_BUTTON_24_WIDTH = 24
+SORT_BUTTON_24_HEIGHT = 20
+
+# Flag dimensions
+FLAG_WIDTH = 24
+FLAG_HEIGHT = 17
+
+# UI Colors
+BG_COLOR = "#e0ded5"
+
+# Font path
+DEFAULT_FONT_PATH = r"C:\Users\Christian\Downloads\Garamond Premier Pro Regular\Garamond Premier Pro Regular.ttf"
+
+# ============================================================================
+# DATA CLASSES
+# ============================================================================
+
+@dataclass
+class Battle:
+    """Represents a single battle within a war."""
+    name: str
+    location: Optional[str]
+    attacker: Dict
+    defender: Dict
+    result: Optional[bool]
+
+
+@dataclass
+class WarGoal:
+    """Represents a single war goal with all its details."""
+    description: str
+    casus_belli: str
+    actor: str
+    receiver: str
+    state_province_id: Optional[str] = None
+
+
+@dataclass
+class War:
+    """Represents a war with all its participants and battles."""
+    name: str
+    attackers: List[str]
+    defenders: List[str]
+    goals: List[WarGoal]
+    battles: List[Battle]
+    original_attacker: Optional[str]
+    original_defender: Optional[str]
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    is_active: bool = False
+
+@dataclass
+class WarStatistics:
+    """Enhanced war statistics"""
+    total_battles: int = 0
+    attacker_wins: int = 0
+    defender_wins: int = 0
+    total_casualties: Dict[str, int] = field(default_factory=dict)
+    war_score_estimate: float = 0.0
+    duration_estimate: Optional[str] = None
+
+@dataclass
+class AppConfig:
+    """Application configuration"""
+    recent_files: List[str] = field(default_factory=list)
+    window_position: Tuple[int, int] = (100, 100)
+    default_mod: str = "None"
+    auto_load_last: bool = False
+    last_mod: str = "None"
+    
+    @classmethod
+    def load(cls, path: str = None):
+        # Use the same directory as the Python script
+        if path is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            path = os.path.join(script_dir, "war_analyzer_config.json")
+        
+        try:
+            if os.path.exists(path):
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                    # Ensure all fields exist
+                    if 'recent_files' not in data:
+                        data['recent_files'] = []
+                    if 'window_position' not in data:
+                        data['window_position'] = (100, 100)
+                    if 'default_mod' not in data:
+                        data['default_mod'] = "None"
+                    if 'auto_load_last' not in data:
+                        data['auto_load_last'] = False
+                    if 'last_mod' not in data:
+                        data['last_mod'] = "None"
+                    return cls(**data)
+        except Exception:
+            # Silently return default config if loading fails
+            pass
+        return cls()
+    
+    def save(self, path: str = None):
+        """Save configuration to JSON file."""
+        if path is None:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            path = os.path.join(script_dir, "war_analyzer_config.json")
+        
+        try:
+            config_dict = {
+                'recent_files': self.recent_files,
+                'window_position': self.window_position,
+                'default_mod': self.default_mod,
+                'auto_load_last': self.auto_load_last,
+                'last_mod': self.last_mod
+            }
+            
+            with open(path, 'w') as f:
+                json.dump(config_dict, f, indent=2)
+                
+        except Exception:
+            # Silently fail if saving config fails
+            pass
+
+@dataclass
+class AppState:
+    """Central state management for the application."""
+    vic2_path: Optional[str] = None
+    mod_name: str = "None"
+    save_file_path: str = "No save file selected"
+    
+    # Data caching - FIX: Initialize as empty dict, not None
+    _wars_data: Optional[List[War]] = None
+    _save_file_text: Optional[str] = None
+    _parsed_great_nations: Optional[Set[str]] = None
+    _parsed_country_governments: Optional[Dict[str, str]] = None
+    _parsed_country_cultures: Optional[Dict[str, str]] = None
+    _localization_cache: Optional[Dict[str, str]] = None
+    _government_cache_loaded: bool = False
+    _culture_mappings_cache: Optional[Dict[str, str]] = None
+    _cb_types_cache: Optional[Dict[str, int]] = field(default_factory=dict)
+    _unit_types_cache: Optional[Dict[str, str]] = None
+    
+    # Add property for save_file_text
+    @property
+    def save_file_text(self) -> str:
+        return self._save_file_text or ""
+    
+    @save_file_text.setter
+    def save_file_text(self, value: str):
+        self._save_file_text = value
+    
+    @property
+    def localization_names(self) -> Dict[str, str]:
+        if self._localization_cache is None:
+            self._localization_cache = LocalizationParser.parse_localization_files(self)
+        return self._localization_cache
+    
+    @localization_names.setter
+    def localization_names(self, value: Dict[str, str]):
+        self._localization_cache = value
+    
+    @property
+    def wars_data(self) -> List[War]:
+        return self._wars_data or []
+    
+    @wars_data.setter
+    def wars_data(self, value: List[War]):
+        self._wars_data = value
+    
+    @property
+    def great_nations(self) -> Set[str]:
+        return self._parsed_great_nations or set()
+    
+    @great_nations.setter
+    def great_nations(self, value: Set[str]):
+        self._parsed_great_nations = value
+    
+    @property
+    def country_governments(self) -> Dict[str, str]:
+        return self._parsed_country_governments or {}
+    
+    @country_governments.setter
+    def country_governments(self, value: Dict[str, str]):
+        self._parsed_country_governments = value
+    
+    @property
+    def _country_cultures(self) -> Dict[str, str]:
+        return self._parsed_country_cultures or {}
+    
+    @_country_cultures.setter 
+    def _country_cultures(self, value: Dict[str, str]):
+        self._parsed_country_cultures = value
+    
+    # Existing fields
+    filtered_wars: List[War] = field(default_factory=list)
+    selected_war_index: Optional[int] = None
+    selected_countries: Set[str] = field(default_factory=set)
+    
+    gov_to_flagtype: Dict[str, str] = field(default_factory=dict)
+    gov_index_map: Dict[str, str] = field(default_factory=dict)
+    localization_names: Dict[str, str] = field(default_factory=dict)
+
+    image_cache: 'ImageCache' = field(default_factory=lambda: ImageCache())
+    config: AppConfig = field(default_factory=AppConfig)
+    save_file_text: str = ""
+    
+    def get_modded_path(self, relative_path: str) -> str:
+        """Get the path to a file or directory, checking mod folder first then base game."""
+        if self.mod_name != "None" and self.vic2_path:
+            mod_path = Path(self.vic2_path) / "mod" / self.mod_name / relative_path
+            if mod_path.exists():
+                return str(mod_path)
+        
+        if self.vic2_path:
+            base_path = Path(self.vic2_path) / relative_path
+            if base_path.exists():
+                return str(base_path)
+        
+        return relative_path
+    
+class CustomCheckbox:
+    """Custom checkbox using game graphics."""
+    
+    def __init__(self, parent, state, config_field, text, x, y, callback=None):
+        self.parent = parent
+        self.state = state
+        self.config_field = config_field
+        self.text = text
+        self.x = x
+        self.y = y
+        self.callback = callback
+        self.images = {}
+        self._load_images()
+        self._create_widgets()
+    
+    def _load_images(self):
+        """Load checkbox images."""
+        checkbox_path = self.state.get_modded_path(os.path.join("gfx", "interface", "checkbox_default.dds"))
+        checkbox_img = SafeLoader.safe_load_image(checkbox_path)
+        
+        if checkbox_img:
+            # Crop 20x20 from left (checked) and right (unchecked)
+            self.images['checked'] = checkbox_img.crop((20, 0, 40, 20))
+            self.images['unchecked'] = checkbox_img.crop((0, 0, 20, 20))
+        else:
+            # Fallback: create simple colored boxes
+            self.images['checked'] = Image.new("RGBA", (20, 20), (0, 255, 0, 255))  # Green
+            self.images['unchecked'] = Image.new("RGBA", (20, 20), (255, 0, 0, 255))  # Red
+        
+        # Convert to PhotoImage
+        self.images['checked_photo'] = ImageTk.PhotoImage(self.images['checked'])
+        self.images['unchecked_photo'] = ImageTk.PhotoImage(self.images['unchecked'])
+    
+    def _create_widgets(self):
+        """Create the checkbox widgets."""
+        # Get current value from config
+        self.var = tk.BooleanVar(value=getattr(self.state.config, self.config_field))
+        
+        # Create container frame
+        self.frame = tk.Frame(self.parent, bg=BG_COLOR)
+        
+        # Create checkbox image label
+        self.checkbox_label = tk.Label(self.frame, 
+                                     image=self.images['checked_photo'] if self.var.get() else self.images['unchecked_photo'],
+                                     cursor="hand2", 
+                                     bg=BG_COLOR,
+                                     borderwidth=0)
+        self.checkbox_label.pack(side=tk.LEFT)
+        
+        # Create text label
+        self.text_label = tk.Label(self.frame, 
+                                 text=self.text, 
+                                 bg=BG_COLOR, 
+                                 font=("Arial", 10),
+                                 cursor="hand2")
+        self.text_label.pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Bind click events
+        self.checkbox_label.bind("<Button-1>", self._toggle)
+        self.text_label.bind("<Button-1>", self._toggle)
+        
+        # Position the frame
+        self.canvas_id = self.parent.create_window(self.x, self.y, anchor=tk.NW, window=self.frame)
+    
+    def _toggle(self, event=None):
+        """Toggle checkbox state."""
+        new_value = not self.var.get()
+        self.var.set(new_value)
+        
+        # Update image
+        if new_value:
+            self.checkbox_label.config(image=self.images['checked_photo'])
+        else:
+            self.checkbox_label.config(image=self.images['unchecked_photo'])
+        
+        # Update config
+        setattr(self.state.config, self.config_field, new_value)
+        self.state.config.save()
+        
+        # Call callback if provided
+        if self.callback:
+            self.callback(new_value)
+    
+    def get_value(self):
+        """Get current checkbox value."""
+        return self.var.get()
+    
+    def set_value(self, value):
+        """Set checkbox value."""
+        self.var.set(value)
+        if value:
+            self.checkbox_label.config(image=self.images['checked_photo'])
+        else:
+            self.checkbox_label.config(image=self.images['unchecked_photo'])
+
+# ============================================================================
+# DYNAMIC LEADER SYSTEM
+# ============================================================================
+
+class CultureLeaderMapper:
+    """Maps cultures to leader types and loads appropriate leader graphics."""
+    
+    @staticmethod
+    def load_culture_group_mappings(state: AppState) -> Dict[str, str]:
+        if state._culture_mappings_cache is not None:
+            return state._culture_mappings_cache
+            
+        culture_to_leader = {}
+        cultures_path = state.get_modded_path(os.path.join("common", "cultures.txt"))
+        
+        if not os.path.exists(cultures_path):
+            return culture_to_leader
+        
+        try:
+            with open(cultures_path, 'r', encoding='latin-1') as f:
+                content = f.read()
+            
+            # Remove comments to simplify parsing
+            content = re.sub(r'#.*', '', content)
+            
+            # Parse culture groups and their leader types
+            group_pattern = re.compile(r'([a-zA-Z_]+)\s*=\s*\{', re.DOTALL)
+            pos = 0
+            
+            while True:
+                group_match = group_pattern.search(content, pos)
+                if not group_match:
+                    break
+                    
+                group_name = group_match.group(1)
+                group_block_start = group_match.end() - 1
+                
+                # Extract the entire culture group block
+                group_block = SavefileParser._extract_block(content, group_block_start)
+                if not group_block:
+                    pos = group_match.end()
+                    continue
+                
+                # Extract leader type for this culture group
+                leader_match = re.search(r'leader\s*=\s*([a-zA-Z_]+)', group_block)
+                if not leader_match:
+                    pos = group_block_start + len(group_block)
+                    continue
+                    
+                leader_type = leader_match.group(1)
+                
+                # Find culture definitions within this group block
+                culture_pattern = re.compile(r'([a-zA-Z_]+)\s*=\s*\{', re.DOTALL)
+                culture_pos = 0
+                
+                while True:
+                    culture_match = culture_pattern.search(group_block, culture_pos)
+                    if not culture_match:
+                        break
+                    
+                    culture_name = culture_match.group(1)
+                    
+                    # Skip known group-level properties
+                    if culture_name in ['leader', 'unit', 'graphical_culture', 'color', 'is_overseas', 'union']:
+                        culture_pos = culture_match.end()
+                        continue
+                    
+                    # Skip sub-properties
+                    if culture_name in ['first_names', 'last_names', 'radicalism', 'primary']:
+                        culture_pos = culture_match.end()
+                        continue
+                    
+                    # Extract the culture block to verify it's a real culture
+                    culture_block_start = culture_match.end() - 1
+                    culture_block = SavefileParser._extract_block(group_block, culture_block_start)
+                    
+                    if culture_block:
+                        # Check if it has culture properties
+                        if re.search(r'(first_names|last_names|color|radicalism|primary)\s*=', culture_block):
+                            culture_to_leader[culture_name] = leader_type
+                    
+                    culture_pos = culture_match.end()
+                
+                pos = group_block_start + len(group_block)
+        
+        except Exception:
+            # Silently fail and return empty mapping
+            pass
+        state._culture_mappings_cache = culture_to_leader
+        return culture_to_leader
+    
+    @staticmethod
+    def detect_cultures_and_governments(save_text: str, gov_index_map: Dict[str, str]) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """Detect BOTH cultures and governments for all countries using the same reliable method."""
+        tag_to_culture = {}
+        tag_to_gov = {}
+        
+        # Use the EXACT same logic as SavefileParser.detect_governments but also get cultures
+        for match in re.finditer(r'country\s*=\s*\{', save_text):
+            block = SavefileParser._extract_block(save_text, match.end() - 1)
+            
+            tag_match = re.search(r'tag\s*=\s*"([A-Z0-9-]{3})"', block)
+            if not tag_match:
+                continue
+            
+            tag = tag_match.group(1)
+            
+            # Get culture
+            culture_match = re.search(r'primary_culture\s*=\s*"([^"]+)"', block)
+            if culture_match:
+                culture = culture_match.group(1).strip()
+                tag_to_culture[tag] = culture
+            
+            # Get government (same as original)
+            gov_match = re.search(r'government\s*=\s*("?([A-Za-z_]+)"?|\d+)', block)
+            if gov_match:
+                val = gov_match.group(1).strip('"')
+                gov = gov_index_map.get(val, val) if val.isdigit() else val
+                tag_to_gov[tag] = gov
+        
+        for match in re.finditer(r'([A-Z0-9-]{3})\s*=\s*\{', save_text):
+            tag = match.group(1)
+            block = SavefileParser._extract_block(save_text, match.end() - 1)
+            
+            # Get culture
+            culture_match = re.search(r'primary_culture\s*=\s*"([^"]+)"', block)
+            if culture_match:
+                culture = culture_match.group(1).strip()
+                tag_to_culture[tag] = culture
+            
+            # Get government (same as original)
+            gov_match = re.search(r'government\s*=\s*("?([A-Za-z_]+)"?|\d+)', block)
+            if gov_match:
+                val = gov_match.group(1).strip('"')
+                gov = gov_index_map.get(val, val) if val.isdigit() else val
+                tag_to_gov[tag] = gov
+        
+        return tag_to_culture, tag_to_gov
+    
+    @staticmethod
+    def get_leader_graphics(state: AppState, country_tag: str, is_naval: bool = False) -> Optional[str]:
+        """Get appropriate leader graphics for a country."""
+        # Load culture group mappings if not already loaded
+        if not hasattr(state, '_culture_to_leader'):
+            state._culture_to_leader = CultureLeaderMapper.load_culture_group_mappings(state)
+        
+        # Get country's specific culture
+        if not hasattr(state, '_country_cultures'):
+            leader_type = "european"
+        else:
+            specific_culture = state._country_cultures.get(country_tag)
+            
+            if not specific_culture:
+                leader_type = "european"
+            else:
+                # Map specific culture to leader type using the loaded mappings
+                leader_type = state._culture_to_leader.get(specific_culture, "european")
+        
+        # Determine leader file pattern
+        if is_naval:
+            leader_pattern = f"{leader_type}_admiral_*.dds"
+        else:
+            leader_pattern = f"{leader_type}_general_*.dds"
+        
+        # Find all matching leader files with mod support
+        leaders_path = state.get_modded_path(os.path.join("gfx", "interface", "leaders"))
+        
+        if not os.path.exists(leaders_path):
+            return None
+        
+        # Get all matching files
+        import glob
+        pattern = os.path.join(leaders_path, leader_pattern)
+        matching_files = glob.glob(pattern)
+        
+        if not matching_files:
+            # Fallback to default European
+            if is_naval:
+                fallback_pattern = "european_admiral_*.dds"
+            else:
+                fallback_pattern = "european_general_*.dds"
+            
+            fallback_pattern_path = os.path.join(leaders_path, fallback_pattern)
+            matching_files = glob.glob(fallback_pattern_path)
+            
+            if not matching_files:
+                return None
+        
+        # Pick a random leader file
+        import random
+        selected_leader = random.choice(matching_files)
+        
+        return selected_leader
+
+# ============================================================================
+# OPTIMIZED PARSER INTEGRATION
+# ============================================================================
+
+class EnhancedBattleParser:
+    """Enhanced battle parser that extracts ALL unit types including modded ones."""
+
+    @staticmethod
+    def parse_battle_units_with_variants(side_block: str) -> Dict:
+        """Parse ALL units including defensive/offensive variants."""
+        units = {}
+        
+        # Look for any unit type pattern (word followed by = number)
+        unit_pattern = re.compile(r'(\w+)\s*=\s*(\d+)')
+        
+        # List of fields to exclude (non-unit fields)
+        exclude_fields = {'losses', 'country', 'leader'}
+        
+        for match in unit_pattern.finditer(side_block):
+            unit_name = match.group(1)
+            count = int(match.group(2))
+            
+            # Skip non-unit fields
+            if unit_name in exclude_fields:
+                continue
+            
+            # Include ALL units including variants
+            units[unit_name] = count
+        
+        return units
+
+class OptimizedSavefileParser:
+    """Comprehensive war parser that extracts all war details."""
+    @staticmethod
+    def parse_great_nations(save_text: str) -> Set[str]:
+        """Parse great nations from save file using save file order only."""
+        great_nations = set()
+        
+        # Parse country order directly from save file
+        save_countries = []
+        
+        # Look for the pattern: TAG=\n{\n    tax_base= (or similar whitespace)
+        pattern = re.compile(r'^\s*([A-Z]{3})\s*=\s*\n\s*\{[^}]*?tax_base\s*=', re.MULTILINE | re.DOTALL)
+        matches = pattern.findall(save_text)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        for tag in matches:
+            if tag not in seen:
+                seen.add(tag)
+                save_countries.append(tag)
+        
+        # If no countries found with tax_base pattern, try compact format as fallback
+        if not save_countries:
+            pattern_compact = re.compile(r'^\s*([A-Z]{3})\s*=\s*\{[^{}]{0,200}?tax_base\s*=', re.MULTILINE | re.DOTALL)
+            compact_matches = pattern_compact.findall(save_text)
+            
+            seen_compact = set()
+            for tag in compact_matches:
+                if tag not in seen_compact:
+                    seen_compact.add(tag)
+                    save_countries.append(tag)
+        
+        # Parse great nations using save file order
+        match = re.search(r'great_nations\s*=\s*\{([^}]+)\}', save_text)
+        if not match:
+            return great_nations
+        
+        great_nations_block = match.group(1)
+        
+        # Extract numbers from the block
+        numbers = re.findall(r'\b(\d+)\b', great_nations_block)
+        
+        # Convert numbers to country tags using SAVE FILE ORDER
+        for num in numbers:
+            num_int = int(num)
+            if num_int - 1 < len(save_countries):
+                save_file_tag = save_countries[num_int - 1]
+                great_nations.add(save_file_tag)
+        
+        return great_nations
+
+    @staticmethod
+    def parse_wars(path: str) -> Tuple[List[War], str]:
+        """Parse wars from save file using comprehensive extraction."""
+        try:
+            with open(path, 'r', encoding='latin-1') as f:
+                text = f.read()
+        except Exception:
+            return [], ""
+        
+        wars = []
+        
+        # Look for both active and previous wars
+        war_indicators = ['active_war=', 'previous_war=']
+        
+        for indicator in war_indicators:
+            pos = 0
+            while True:
+                war_start = text.find(indicator, pos)
+                if war_start == -1:
+                    break
+                
+                # Parse the war block and pass the indicator type
+                block, new_pos = OptimizedSavefileParser._extract_block(text, war_start)
+                if block:
+                    # Pass the indicator type to the parser
+                    war = OptimizedSavefileParser._parse_war_block(block, indicator)
+                    if war:
+                        wars.append(war)
+                pos = new_pos if new_pos > pos else pos + 1
+        
+        return wars, text
+    
+    @staticmethod
+    def _extract_block(text: str, start: int) -> Tuple[Optional[str], int]:
+        """Extract a brace-delimited block."""
+        brace_count = 0
+        pos = start
+        block_start = None
+        
+        # Find the opening brace
+        while pos < len(text) and text[pos] != '{':
+            pos += 1
+        
+        if pos >= len(text):
+            return None, pos
+        
+        block_start = pos
+        brace_count = 1
+        pos += 1
+        
+        # Find matching closing brace
+        while pos < len(text) and brace_count > 0:
+            if text[pos] == '{':
+                brace_count += 1
+            elif text[pos] == '}':
+                brace_count -= 1
+            pos += 1
+        
+        if brace_count == 0:
+            return text[block_start:pos], pos
+        return None, pos
+    
+    @staticmethod
+    def _parse_war_block(block: str, indicator: str = "") -> Optional[War]:
+        """Parse a single war block into a War object."""
+        name_match = re.search(r'name="([^"]+)"', block)
+        name = name_match.group(1) if name_match else "(no name)"
+        
+        # Determine if this is an active or previous war based on the indicator
+        is_active = indicator == 'active_war='
+        
+        attackers = set()
+        defenders = set()
+
+        oa = re.search(r'original_attacker="([^"]+)"', block)
+        od = re.search(r'original_defender="([^"]+)"', block)
+
+        if oa:
+            attackers.add(oa.group(1))
+        if od:
+            defenders.add(od.group(1))
+
+        for match in re.finditer(r'add_attacker="([^"]+)"', block):
+            attackers.add(match.group(1))
+        for match in re.finditer(r'add_defender="([^"]+)"', block):
+            defenders.add(match.group(1))
+        
+        # Now parse war participation with dates SEPARATELY for date calculation only
+        participation_events = []
+        
+        # Find all participation changes with dates
+        for match in re.finditer(r'(add_attacker|add_defender|rem_attacker|rem_defender)\s*=\s*"([^"]+)"\s*(\d+\.\d+\.\d+)?', block):
+            action = match.group(1)  # add_attacker, add_defender, rem_attacker, rem_defender
+            country = match.group(2)
+            date = match.group(3) if match.group(3) else None
+            
+            participation_events.append({
+                'action': action,
+                'country': country,
+                'date': date
+            })
+        
+        # Calculate war dates based on participation events
+        start_date = None
+        end_date = None
+        
+        # Parse war participation with dates - Victoria 2 format is different!
+        participation_events = []
+
+        # Look for date blocks containing participation events
+        # Format: 1836.7.31={ add_attacker="NOV" }
+        for match in re.finditer(r'(\d+\.\d+\.\d+)\s*=\s*\{([^}]+)\}', block):
+            date = match.group(1)
+            inner_block = match.group(2)
+            
+            # Check for participation events inside this date block
+            for action_match in re.finditer(r'(add_attacker|add_defender|rem_attacker|rem_defender)\s*=\s*"([^"]+)"', inner_block):
+                action = action_match.group(1)
+                country = action_match.group(2)
+                
+                participation_events.append({
+                    'action': action,
+                    'country': country,
+                    'date': date
+                })
+
+        # SIMPLIFIED date calculation - just use first and last events
+        start_date = None
+        end_date = None
+
+        if participation_events:
+            # Sort by date
+            participation_events.sort(key=lambda x: x['date'])
+            start_date = participation_events[0]['date']
+            end_date = participation_events[-1]['date']
+
+        # If no dates found from events, try direct fields as fallback
+        if not start_date:
+            start_match = re.search(r'start_date\s*=\s*"([^"]+)"', block)
+            if start_match:
+                start_date = start_match.group(1)
+
+        if not end_date and 'previous_war=' in block:
+            end_match = re.search(r'end_date\s*=\s*"([^"]+)"', block)
+            if end_match:
+                end_date = end_match.group(1)
+        
+        # ENHANCED: Parse war goals with proper multi-line support
+        goals = []
+
+        # Parse war goals using the _extract_block method to handle multi-line blocks
+        for match in re.finditer(r'war_?goal\s*=\s*\{', block):
+            goal_block = OptimizedSavefileParser._extract_block(block, match.end() - 1)
+            if goal_block:
+                goal_content = goal_block[0]
+                
+                # Extract fields from the multi-line block
+                cb_match = re.search(r'casus_belli\s*=\s*"([^"]+)"', goal_content)
+                actor_match = re.search(r'actor\s*=\s*"([^"]+)"', goal_content)
+                receiver_match = re.search(r'receiver\s*=\s*"([^"]+)"', goal_content)
+                spid_match = re.search(r'state_province_id\s*=\s*(\d+)', goal_content)
+                
+                if cb_match:
+                    actor = actor_match.group(1) if actor_match else None
+                    receiver = receiver_match.group(1) if receiver_match else None
+                    
+                    # If actor/receiver are missing, use war leaders as fallback
+                    if not actor:
+                        # Get war leaders from the main war participants
+                        attackers = set()
+                        defenders = set()
+                        
+                        oa = re.search(r'original_attacker="([^"]+)"', block)
+                        if oa and oa.group(1) != "---":
+                            attackers.add(oa.group(1))
+                        
+                        od = re.search(r'original_defender="([^"]+)"', block)  
+                        if od and od.group(1) != "---":
+                            defenders.add(od.group(1))
+                        
+                        for add_match in re.finditer(r'add_attacker="([^"]+)"', block):
+                            if add_match.group(1) != "---":
+                                attackers.add(add_match.group(1))
+                        for add_match in re.finditer(r'add_defender="([^"]+)"', block):
+                            if add_match.group(1) != "---":
+                                defenders.add(add_match.group(1))
+                        
+                        actor = sorted(attackers)[0] if attackers else "UNK"
+                        receiver = sorted(defenders)[0] if defenders else "UNK"
+                    
+                    cb = cb_match.group(1)
+                    state_id = spid_match.group(1) if spid_match else None
+                    
+                    # Create war goal
+                    if state_id:
+                        goal_desc = f"{actor} {cb} (State {state_id}) against {receiver}"
+                    else:
+                        goal_desc = f"{actor} {cb} against {receiver}"
+                    
+                    war_goal = WarGoal(
+                        description=goal_desc,
+                        casus_belli=cb,
+                        actor=actor,
+                        receiver=receiver,
+                        state_province_id=state_id
+                    )
+                    goals.append(war_goal)
+
+        # Fallback for any loose casus_belli
+        if not goals:
+            cb_matches = re.findall(r'casus_belli\s*=\s*"([^"]+)"', block)
+            for cb in cb_matches:
+                if cb and cb != "none" and cb != "None":
+                    war_goal = WarGoal(
+                        description=f"{actor} {cb} against {receiver}",
+                        casus_belli=cb,
+                        actor=actor,
+                        receiver=receiver,
+                        state_province_id=None
+                    )
+                    goals.append(war_goal)
+                
+        battles = OptimizedSavefileParser._parse_battles(block)
+        
+        return War(
+            name=name,
+            attackers=sorted([t for t in attackers if t != "---"]),
+            defenders=sorted([t for t in defenders if t != "---"]),
+            goals=goals,
+            battles=battles,
+            original_attacker=oa.group(1) if oa else None,
+            original_defender=od.group(1) if od else None,
+            start_date=start_date,
+            end_date=end_date,
+            is_active=is_active
+        )
+    
+    @staticmethod
+    def _parse_battles(block: str) -> List[Battle]:
+        """Parse all battles from a war block."""
+        battles = []
+        
+        for match in re.finditer(r'battle\s*=\s*\{', block):
+            battle_block = OptimizedSavefileParser._extract_block(block, match.end() - 1)
+            if battle_block:
+                battle = OptimizedSavefileParser._parse_battle_block(battle_block[0])
+                if battle:
+                    battles.append(battle)
+        
+        return battles
+    
+    @staticmethod
+    def _parse_battle_block(block: str) -> Optional[Battle]:
+        """Parse a single battle block with enhanced unit information."""
+        name = re.search(r'name="([^"]+)"', block)
+        name = name.group(1) if name else "(no name)"
+        
+        loc = re.search(r'location=(\d+)', block)
+        location = loc.group(1) if loc else None
+        
+        # Enhanced side parsing - this will now extract units separately for each side
+        attacker = OptimizedSavefileParser._extract_side_enhanced(block, 'attacker')
+        defender = OptimizedSavefileParser._extract_side_enhanced(block, 'defender')
+        
+        result_match = re.search(r'result=("[^"]+"|yes|no|\w+)', block)
+        result = None
+        if result_match:
+            rv = result_match.group(1).strip('"')
+            if rv == 'yes':
+                result = True
+            elif rv == 'no':
+                result = False
+            else:
+                result = rv
+        
+        return Battle(
+            name=name,
+            location=location,
+            attacker=attacker,
+            defender=defender,
+            result=result
+        )
+
+    @staticmethod
+    def _extract_side_enhanced(block: str, side: str) -> Dict:
+        """Enhanced side extraction with leader and unit information."""
+        match = re.search(rf'{side}\s*=\s*\{{(.*?)\}}', block, re.S)
+        if not match:
+            return {}
+        
+        side_text = match.group(1)
+        info = {}
+        
+        # Basic information
+        leader_match = re.search(r'leader="([^"]*)"', side_text)
+        if leader_match:
+            leader = leader_match.group(1).strip()
+            info['leader'] = leader if leader else "No Commander"
+        else:
+            info['leader'] = "Unknown"
+        
+        country_match = re.search(r'country="([^"]+)"', side_text)
+        if country_match:
+            info['country'] = country_match.group(1)
+        
+        losses_match = re.search(r'losses=(\d+)', side_text)
+        if losses_match:
+            info['losses'] = int(losses_match.group(1))
+        
+        # Enhanced unit information - parse ONLY the units from this side's block
+        units = EnhancedBattleParser.parse_battle_units_with_variants(side_text)
+        info['units'] = units
+        
+        return info
+
+# ============================================================================
+# UPDATED BATTLE UNIT TYPE CLASSIFICATION
+# ============================================================================
+
+class UnitTypeClassifier:
+    """Classifies units into land and naval categories and analyzes battles."""
+    
+    # Vanilla unit type mappings (fallback if unit files can't be parsed)
+    VANILLA_UNIT_TYPES = {
+        # Land - Infantry
+        'infantry': 'infantry',
+        'irregular': 'infantry',
+        'guard': 'infantry',
+        
+        # Land - Cavalry
+        'cavalry': 'cavalry',
+        'cuirassier': 'cavalry',
+        'dragoon': 'cavalry',
+        'hussar': 'cavalry',
+        
+        # Land - Support (Artillery/Engineers) - will be grouped with Special
+        'artillery': 'support_special',
+        'engineer': 'support_special',
+        
+        # Land - Special (Tanks, etc.) - grouped with Support
+        'tank': 'support_special',
+        
+        # Naval - Big Ships
+        'manowar': 'big_ship',
+        'ironclad': 'big_ship',
+        'monitor': 'big_ship',
+        'battleship': 'big_ship',
+        'dreadnought': 'big_ship',
+        
+        # Naval - Light Ships
+        'frigate': 'light_ship',
+        'commerce_raider': 'light_ship',
+        'cruiser': 'light_ship',
+        
+        # Naval - Transports
+        'clipper_transport': 'transport',
+        'transport': 'transport',
+    }
+    
+    @staticmethod
+    def load_unit_types(state: AppState) -> Dict[str, str]:
+        if state._unit_types_cache is not None:
+            return state._unit_types_cache
+            
+        unit_types = UnitTypeClassifier.VANILLA_UNIT_TYPES.copy()
+        
+        # Get the units folder path with mod support
+        units_path = state.get_modded_path(os.path.join("units"))
+        
+        if not os.path.exists(units_path):
+            # Try alternative paths
+            alternative_paths = [
+                state.get_modded_path("units"),
+                os.path.join(state.vic2_path, "units") if state.vic2_path else "",
+                os.path.join(state.vic2_path, "mod", state.mod_name, "units") if state.vic2_path and state.mod_name != "None" else "",
+            ]
+            
+            for alt_path in alternative_paths:
+                if alt_path and os.path.exists(alt_path):
+                    units_path = alt_path
+                    break
+            else:
+                return unit_types
+        
+        try:
+            unit_files = [f for f in os.listdir(units_path) if f.endswith('.txt')]
+            
+            for filename in unit_files:
+                unit_name = filename[:-4]  # Remove .txt extension
+                file_path = os.path.join(units_path, filename)
+                
+                try:
+                    with open(file_path, 'r', encoding='latin-1') as f:
+                        content = f.read()
+                    
+                    # Parse unit_type from the file
+                    unit_type_match = re.search(r'unit_type\s*=\s*"([^"]+)"', content)
+                    if unit_type_match:
+                        game_unit_type = unit_type_match.group(1)
+                        category = UnitTypeClassifier._map_unit_type(game_unit_type)
+                        unit_types[unit_name] = category
+                    else:
+                        # If no unit_type found, try to infer from name
+                        category = UnitTypeClassifier._infer_unit_type(unit_name)
+                        unit_types[unit_name] = category
+                        
+                except Exception:
+                    # Add with inferred type as fallback
+                    category = UnitTypeClassifier._infer_unit_type(unit_name)
+                    unit_types[unit_name] = category
+                    
+        except Exception:
+            # If scanning fails, return what we have (vanilla mappings)
+            pass
+
+        state._unit_types_cache = unit_types
+        return unit_types
+    
+    @staticmethod
+    def _map_unit_type(game_unit_type: str) -> str:
+        """Map game unit types to our categories."""
+        game_unit_type = game_unit_type.lower()
+        
+        # Land units
+        if game_unit_type in ['infantry', 'irregular']:
+            return 'infantry'
+        elif game_unit_type in ['cavalry', 'cuirassier']:
+            return 'cavalry'
+        elif game_unit_type in ['artillery', 'engineer', 'tank']:
+            return 'support_special'
+        
+        # Naval units
+        elif game_unit_type in ['manowar', 'ironclad', 'battleship', 'dreadnought']:
+            return 'big_ship'
+        elif game_unit_type in ['frigate', 'commerce_raider', 'cruiser']:
+            return 'light_ship'
+        elif game_unit_type in ['transport', 'clipper_transport']:
+            return 'transport'
+        
+        # Default to support_special for unknown land units
+        else:
+            return 'support_special'
+    
+    @staticmethod
+    def _infer_unit_type(unit_name: str) -> str:
+        """Infer unit type from unit name."""
+        unit_name_lower = unit_name.lower()
+        
+        # Land - Infantry indicators
+        if any(indicator in unit_name_lower for indicator in ['infantry', 'guard', 'irregular', 'militia', 'line']):
+            return 'infantry'
+        
+        # Land - Cavalry indicators  
+        elif any(indicator in unit_name_lower for indicator in ['cavalry', 'cuirassier', 'dragoon', 'hussar', 'lancer', 'horse']):
+            return 'cavalry'
+        
+        # Land - Support/Special indicators (grouped together)
+        elif any(indicator in unit_name_lower for indicator in ['artillery', 'engineer', 'support', 'howitzer', 'cannon', 'tank']):
+            return 'support_special'
+        
+        # Naval - Big Ship indicators
+        elif any(indicator in unit_name_lower for indicator in ['manowar', 'ironclad', 'battleship', 'dreadnought', 'monitor']):
+            return 'big_ship'
+        
+        # Naval - Light Ship indicators
+        elif any(indicator in unit_name_lower for indicator in ['frigate', 'cruiser', 'commerce_raider', 'raider']):
+            return 'light_ship'
+        
+        # Naval - Transport indicators
+        elif any(indicator in unit_name_lower for indicator in ['transport', 'clipper']):
+            return 'transport'
+        
+        # Default to support_special for unknown land units
+        else:
+            return 'support_special'
+    
+    @staticmethod
+    def is_naval_unit(unit_type: str) -> bool:
+        """Check if a unit type is naval."""
+        return unit_type in ['big_ship', 'light_ship', 'transport']
+    
+    @staticmethod
+    def is_land_unit(unit_type: str) -> bool:
+        """Check if a unit type is land."""
+        return unit_type in ['infantry', 'cavalry', 'support_special']
+    
+    @staticmethod
+    def analyze_battle_units(battle: Battle, unit_types: Dict[str, str]) -> Dict:
+        """Analyze battle units by category for both sides."""
+        attacker_units = battle.attacker.get('units', {})
+        defender_units = battle.defender.get('units', {})
+        
+        result = {
+            'attacker': UnitTypeClassifier._categorize_units(attacker_units, unit_types),
+            'defender': UnitTypeClassifier._categorize_units(defender_units, unit_types)
+        }
+        
+        return result
+    
+    @staticmethod
+    def _categorize_units(units: Dict[str, int], unit_types: Dict[str, str]) -> Dict[str, int]:
+        """Categorize units into land and naval types."""
+        categorized = {
+            # Land units - CAVALRY FIRST, then infantry, then support/special
+            'cavalry': 0,
+            'infantry': 0,
+            'support_special': 0,
+            # Naval units
+            'big_ship': 0,
+            'light_ship': 0,
+            'transport': 0
+        }
+        
+        for unit_name, count in units.items():
+            # Get the category from our unit types mapping
+            category = unit_types.get(unit_name, 'infantry')  # Default to infantry
+            categorized[category] += count
+        
+        return categorized
+    
+    @staticmethod
+    def get_battle_type(battle: Battle, unit_types: Dict[str, str]) -> str:
+        """Determine if battle is land, naval, or mixed - OPTIMIZED VERSION"""
+        attacker_units = battle.attacker.get('units', {})
+        defender_units = battle.defender.get('units', {})
+        
+        has_land = False
+        has_naval = False
+        
+        # Check attacker units with early exit
+        for unit_name in attacker_units:
+            unit_type = unit_types.get(unit_name, 'infantry')
+            if UnitTypeClassifier.is_land_unit(unit_type):
+                has_land = True
+            elif UnitTypeClassifier.is_naval_unit(unit_type):
+                has_naval = True
+            if has_land and has_naval:
+                break  # Early exit - we already know it's mixed
+        
+        # Check defender units only if we still need to determine battle type
+        if not (has_land and has_naval):
+            for unit_name in defender_units:
+                unit_type = unit_types.get(unit_name, 'infantry')
+                if UnitTypeClassifier.is_land_unit(unit_type):
+                    has_land = True
+                elif UnitTypeClassifier.is_naval_unit(unit_type):
+                    has_naval = True
+                if has_land and has_naval:
+                    break  # Early exit
+        
+        if has_land and has_naval:
+            return 'mixed'
+        elif has_naval:
+            return 'naval'
+        else:
+            return 'land'
+    
+    @staticmethod
+    def is_naval_battle_for_panel(battle: Battle, unit_types: Dict[str, str]) -> bool:
+        """Determine if a battle is naval for panel display purposes."""
+        # Use the optimized battle type detection
+        battle_type = UnitTypeClassifier.get_battle_type(battle, unit_types)
+        return battle_type in ['naval', 'mixed']
+
+# ============================================================================
+# REST OF THE CODE (CB Types Parser, Image Utilities, etc.)
+# ============================================================================
+
+class CBTypesParser:
+    """Parses casus belli types and their sprite indices."""
+    
+    @staticmethod
+    def parse_cb_types(state: AppState) -> Dict[str, int]:
+        """Parse cb_types.txt to get sprite indices for each CB with proper mod support."""
+        cb_to_sprite = {}
+        
+        # Use state.get_modded_path to get the correct file (mod first, then base game)
+        cb_types_path = state.get_modded_path(os.path.join("common", "cb_types.txt"))
+        
+        try:
+            with open(cb_types_path, 'r', encoding='latin-1') as f:
+                content = f.read()
+        except (FileNotFoundError, Exception):
+            return cb_to_sprite
+        
+        # Remove comments
+        content = re.sub(r'#.*', '', content)
+        
+        # Parse each CB type
+        cb_pattern = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*\{([^}]+)\}', re.DOTALL)
+        
+        matches = list(cb_pattern.finditer(content))
+        
+        for match in matches:
+            cb_name = match.group(1)
+            cb_block = match.group(2)
+            
+            # Extract sprite_index
+            sprite_match = re.search(r'sprite_index\s*=\s*(\d+)', cb_block)
+            if sprite_match:
+                sprite_index = int(sprite_match.group(1))
+                cb_to_sprite[cb_name] = sprite_index
+        
+        return cb_to_sprite
+
+# ============================================================================
+# IMAGE UTILITIES
+# ============================================================================
+
+class ImageCache:
+    """Cache for images to improve performance."""
+    def __init__(self, max_size: int = 1000):
+        self.cache = {}
+        self.max_size = max_size
+        self.access_order = []
+    
+    def get(self, key: str) -> Optional[Image.Image]:
+        if key in self.cache:
+            self.access_order.remove(key)
+            self.access_order.append(key)
+            return self.cache[key]
+        return None
+    
+    def set(self, key: str, image: Image.Image):
+        if len(self.cache) >= self.max_size:
+            lru_key = self.access_order.pop(0)
+            del self.cache[lru_key]
+        
+        self.cache[key] = image
+        self.access_order.append(key)
+    
+    def clear(self):
+        self.cache.clear()
+        self.access_order.clear()
+
+
+class SafeLoader:
+    """Safe loading utilities with fallbacks."""
+    
+    @staticmethod
+    def safe_load_image(path: str, size: Optional[Tuple[int, int]] = None, 
+                       default_color: Tuple[int, int, int, int] = (0, 0, 0, 0)) -> Image.Image:
+        """Safely load image with fallback."""
+        try:
+            img = ImageLoader.load_with_alpha(path, size)
+            if img:
+                return img
+        except Exception:
+            pass
+        
+        if size:
+            return Image.new("RGBA", size, default_color)
+        return Image.new("RGBA", (FLAG_WIDTH, FLAG_HEIGHT), default_color)
+
+
+class ImageLoader:
+    """Handles image loading and processing."""
+    
+    @staticmethod
+    def load_with_alpha(path: str, size: Optional[Tuple[int, int]] = None) -> Optional[Image.Image]:
+        """Load an image with alpha channel, optionally resizing it."""
+        try:
+            img = Image.open(path).convert("RGBA")
+            if size:
+                img = img.resize(size, Image.Resampling.LANCZOS)
+            return img
+        except Exception as e:
+            return None
+    
+    @staticmethod
+    def crop(img: Image.Image, left: int = 0, top: int = 0, 
+             right: int = 0, bottom: int = 0) -> Image.Image:
+        """Crop an image from all sides."""
+        w, h = img.size
+        return img.crop((left, top, w - right, h - bottom))
+
+
+# ============================================================================
+# ORIGINAL PARSER CLASSES
+# ============================================================================
+
+class GovernmentParser:
+    """Parses government definitions from governments.txt."""
+    
+    @staticmethod
+    def parse(path: str) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """Parse governments.txt and return flagtype and index mappings."""
+        try:
+            with open(path, "r", encoding="latin-1") as f:
+                text = f.read()
+        except Exception:
+            return {}, {}
+        
+        text = re.sub(r'#.*', '', text)
+        
+        gov_to_flagtype = {}
+        index_to_govname = {}
+        index = 0
+        
+        pattern = re.compile(r'([A-Za-z0-9_]+)\s*=\s*\{', re.M)
+        pos = 0
+        
+        while True:
+            match = pattern.search(text, pos)
+            if not match:
+                break
+            
+            name = match.group(1)
+            block = GovernmentParser._extract_block(text, match.end() - 1)
+            pos = match.end() + len(block)
+            
+            index += 1
+            index_to_govname[str(index)] = name
+            
+            flagtype_match = re.search(r'flagType\s*=\s*([A-Za-z_]+)', block)
+            if flagtype_match:
+                gov_to_flagtype[name] = flagtype_match.group(1)
+        
+        return gov_to_flagtype, index_to_govname
+    
+    @staticmethod
+    def _extract_block(text: str, start: int) -> str:
+        """Extract a brace-delimited block from text."""
+        brace_count = 0
+        pos = start
+        block_start = None
+        
+        while pos < len(text):
+            if text[pos] == '{':
+                brace_count += 1
+                if brace_count == 1:
+                    block_start = pos
+            elif text[pos] == '}':
+                brace_count -= 1
+                if brace_count == 0 and block_start is not None:
+                    return text[block_start:pos + 1]
+            pos += 1
+        
+        return ''
+
+class LocalizationParser:
+    """Parses localization files for country names."""
+    
+    @staticmethod
+    def parse_localization_files(state: AppState) -> Dict[str, str]:
+        """Parse localization - distinguish between country names, government names, and other entries."""
+        if state._localization_cache is not None:
+            return state._localization_cache
+            
+        country_names = {}
+        loc_path = "localisation"
+        
+        # Get all files from both mod and base
+        all_files = []
+        
+        # MOD files first
+        if state.mod_name != "None" and state.vic2_path:
+            mod_loc_path = Path(state.vic2_path) / "mod" / state.mod_name / loc_path
+            if mod_loc_path.exists():
+                mod_files = []
+                for root, dirs, files in os.walk(str(mod_loc_path)):
+                    for file in files:
+                        if file.lower().endswith('.csv'):
+                            full_path = os.path.join(root, file)
+                            mod_files.append(full_path)
+                mod_files.sort()
+                all_files.extend(mod_files)
+        
+        # BASE files second
+        if state.vic2_path:
+            base_loc_path = Path(state.vic2_path) / loc_path
+            if base_loc_path.exists():
+                base_files = []
+                for root, dirs, files in os.walk(str(base_loc_path)):
+                    for file in files:
+                        if file.lower().endswith('.csv'):
+                            full_path = os.path.join(root, file)
+                            base_files.append(full_path)
+                base_files.sort()
+                all_files.extend(base_files)
+        
+        # Track what we've found for each category
+        found_simple_country_tags = set()  # "ARY", "ARA" - basic country names
+        found_government_tags = set()      # "ARY_absolute_monarchy" - government-specific names
+        
+        # Process ALL files in order
+        for file_path in all_files:
+            try:
+                encodings = ['utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1', 'utf-8']
+                content = None
+                
+                for encoding in encodings:
+                    try:
+                        with open(file_path, 'r', encoding=encoding) as f:
+                            content = f.read()
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                
+                if content is None:
+                    continue
+                    
+            except Exception:
+                continue
+            
+            lines = content.split('\n')
+            
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                
+                separators = [';', ',']
+                parts = None
+                
+                for sep in separators:
+                    if sep in line:
+                        parts = line.split(sep)
+                        if len(parts) >= 2:
+                            break
+                
+                if not parts or len(parts) < 2:
+                    continue
+                
+                key = parts[0].strip().strip('"')
+                value = parts[1].strip().strip('"')
+                
+                if key and value:
+                    # CATEGORY 1: Simple country tags (like "ARY", "ARA")
+                    is_simple_country_tag = (
+                        len(key) == 3 and 
+                        key.isalpha() and 
+                        key.isupper()
+                    )
+                    
+                    # CATEGORY 2: Government-specific country names (like "ARY_absolute_monarchy")
+                    is_government_tag = (
+                        '_' in key and 
+                        len(key.split('_')[0]) == 3 and 
+                        key.split('_')[0].isalpha() and 
+                        key.split('_')[0].isupper()
+                    )
+                    
+                    # CATEGORY 3: Everything else (parties, adjectives, etc.)
+                    
+                    if is_simple_country_tag:
+                        # Simple country name - first match wins
+                        if key not in found_simple_country_tags:
+                            country_names[key] = value
+                            found_simple_country_tags.add(key)
+                            
+                            # Store lowercase version
+                            country_names[key.lower()] = value
+                    
+                    elif is_government_tag:
+                        # Government-specific country name - first match wins per government type
+                        if key not in found_government_tags:
+                            country_names[key] = value
+                            found_government_tags.add(key)
+                            
+                            # Store lowercase version
+                            country_names[key.lower()] = value
+                    
+                    else:
+                        # Everything else (parties, adjectives, etc.) - ALWAYS store
+                        country_names[key] = value
+                        if key != key.lower():
+                            country_names[key.lower()] = value
+                        if '_' in key:
+                            simplified_key = key.replace('_', '')
+                            country_names[simplified_key] = value
+        state._localization_cache = country_names
+        return country_names
+    
+    @staticmethod
+    def _parse_localization_folder(folder_path: str, country_names: Dict[str, str]):
+        """Parse CSV files in consistent alphabetical order."""
+        if not os.path.isdir(folder_path):
+            return
+        
+        csv_files = []
+        for root, dirs, files in os.walk(folder_path):
+            for file in files:
+                if file.lower().endswith('.csv'):
+                    csv_files.append(os.path.join(root, file))
+        
+        # Sort files alphabetically for consistent processing order
+        csv_files.sort()
+        
+        for csv_file in csv_files:
+            LocalizationParser._parse_csv_file(csv_file, country_names)
+    
+    @staticmethod
+    def _parse_csv_file(file_path: str, country_names: Dict[str, str]):
+        """Parse a single CSV file - ORIGINAL WORKING VERSION."""
+        try:
+            encodings = ['utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1', 'utf-8']
+            content = None
+            
+            for encoding in encodings:
+                try:
+                    with open(file_path, 'r', encoding=encoding) as f:
+                        content = f.read()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if content is None:
+                return
+                
+        except Exception:
+            return
+        
+        lines = content.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            
+            # Handle different CSV formats
+            separators = [';', ',']
+            parts = None
+            
+            for sep in separators:
+                if sep in line:
+                    parts = line.split(sep)
+                    if len(parts) >= 2:
+                        break
+            
+            if not parts or len(parts) < 2:
+                continue
+            
+            key = parts[0].strip().strip('"')
+            value = parts[1].strip().strip('"')
+            
+            if key and value:
+                # Store both original key and lowercase version for case-insensitive lookup
+                country_names[key] = value
+                
+                # Also store lowercase key for case-insensitive matching
+                if key != key.lower():
+                    country_names[key.lower()] = value
+                
+                # For government-specific names, also store without underscores for fuzzy matching
+                if '_' in key:
+                    simplified_key = key.replace('_', '')
+                    country_names[simplified_key] = value
+    
+    @staticmethod
+    def get_country_name(state: AppState, tag: str, government: Optional[str] = None) -> str:
+        """Get the proper country name for a tag and government with fallbacks."""
+        if not hasattr(state, 'localization_names') or not state.localization_names:
+            state.localization_names = LocalizationParser.parse_localization_files(state)
+        
+        # Try government-specific name first (e.g., RUS_absolute_monarchy)
+        if government:
+            gov_keys_to_try = [
+                f"{tag}_{government}",
+                f"{tag}_{government.lower()}",
+                f"{tag.upper()}_{government}",
+                f"{tag.upper()}_{government.lower()}",
+            ]
+            
+            for gov_key in gov_keys_to_try:
+                if gov_key in state.localization_names:
+                    return state.localization_names[gov_key]
+        
+        # Try regular tag name
+        lookup_keys = [tag, tag.upper(), tag.lower(), f"_{tag}", f"_{tag.upper()}"]
+        for key in lookup_keys:
+            if key in state.localization_names:
+                return state.localization_names[key]
+        
+        return tag
+
+class SavefileParser:
+    """Parses Victoria 2 save files for war data."""
+
+    @staticmethod
+    def _extract_block(text: str, start: int) -> str:
+        """Extract a brace-delimited block."""
+        brace_count = 0
+        pos = start
+        block_start = None
+        
+        while pos < len(text):
+            if text[pos] == '{':
+                brace_count += 1
+                if brace_count == 1:
+                    block_start = pos
+            elif text[pos] == '}':
+                brace_count -= 1
+                if brace_count == 0 and block_start is not None:
+                    return text[block_start:pos + 1]
+            pos += 1
+        
+        return ''
+
+# ============================================================================
+# ANALYSIS TOOLS
+# ============================================================================
+
+class WarAnalyzer:
+    """Enhanced war analysis tools."""
+    
+    @staticmethod
+    def calculate_war_statistics(war: War) -> WarStatistics:
+        """Calculate war score with casualty adjustment."""
+        stats = WarStatistics(total_battles=len(war.battles))
+        
+        if not war.battles:
+            stats.war_score_estimate = 0.0
+            return stats
+        
+        # Count wins and losses
+        stats.attacker_wins = sum(1 for battle in war.battles if battle.result is True)
+        stats.defender_wins = sum(1 for battle in war.battles if battle.result is False)
+        total_battles = len(war.battles)
+        
+        # Calculate total casualties
+        stats.total_casualties["attacker"] = sum(battle.attacker.get("losses", 0) for battle in war.battles)
+        stats.total_casualties["defender"] = sum(battle.defender.get("losses", 0) for battle in war.battles)
+        
+        # Base score from battle wins (-100% to +100%)
+        base_score = ((stats.attacker_wins - stats.defender_wins) / total_battles) * 100
+        
+        # Casualty adjustment (-20% to +20% max)
+        attacker_losses = stats.total_casualties.get("attacker", 0)
+        defender_losses = stats.total_casualties.get("defender", 0)
+        total_losses = attacker_losses + defender_losses
+        
+        if total_losses > 0 and attacker_losses > 0:
+            casualty_ratio = defender_losses / attacker_losses
+            # casualty_ratio > 1 = good for attacker (defender suffered more)
+            # casualty_ratio < 1 = bad for attacker (attacker suffered more)
+            casualty_adjustment = (casualty_ratio - 1) * 20  # Scale to ±20%
+            casualty_adjustment = max(-20, min(20, casualty_adjustment))
+        else:
+            casualty_adjustment = 0
+        
+        # Combine scores
+        stats.war_score_estimate = base_score + casualty_adjustment
+        stats.war_score_estimate = max(-100, min(100, stats.war_score_estimate))
+        
+        return stats
+
+class ToolTip:
+    """Create a tooltip for a given widget."""
+    def __init__(self, widget, text='', bg='#ffffe0', relief=tk.SOLID, borderwidth=1):
+        self.widget = widget
+        self.text = text
+        self.bg = bg
+        self.relief = relief
+        self.borderwidth = borderwidth
+        self.tip_window = None
+        self.id = None
+        self.x = self.y = 0
+
+    def showtip(self, text, x, y):
+        """Display text in tooltip window at specified coordinates."""
+        self.text = text
+        if self.tip_window or not self.text:
+            return
+        
+      #  x = x + 10
+      # y = y + 10
+        
+        self.tip_window = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        
+        label = tk.Label(tw, text=self.text, justify=tk.LEFT,
+                        background=self.bg, relief=self.relief, 
+                        borderwidth=self.borderwidth, font=("Arial", 10))
+        label.pack(ipadx=1)
+
+    def hidetip(self):
+        """Hide the tooltip."""
+        tw = self.tip_window
+        self.tip_window = None
+        if tw:
+            tw.destroy()
+
+def render_text_image(text, font_path, font_size, color, kerning=0, bold=False):
+    try:
+        font = ImageFont.truetype(font_path, font_size)
+    except:
+        font = ImageFont.load_default()
+    
+    ascent, descent = font.getmetrics()
+    line_height = ascent + descent
+    widths = [(font.getbbox(c)[2] - font.getbbox(c)[0]) if hasattr(font, 'getbbox') else font.getsize(c)[0] for c in text]
+    total_width = sum(widths) + kerning * (len(text) - 1)
+    img = Image.new("RGBA", (total_width, line_height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    x = 0
+    for i, char in enumerate(text):
+        if bold:
+            # Bold effect: draw twice with offset
+            draw.text((x, 0), char, font=font, fill=color)
+            draw.text((x + 1, 0), char, font=font, fill=color)
+        else:
+            draw.text((x, 0), char, font=font, fill=color)
+        x += widths[i] + kerning
+    return img
+
+def get_unit_icon(unit_strip_img, index):
+    w = 36
+    return unit_strip_img.crop((index * w, 0, (index + 1) * w, 36))
+
+def create_label(canvas, text, font_size, pos, anchor, font_path, kerning=0, bold=False, color=(0, 0, 0, 255), images=None):
+    img = render_text_image(text, font_path, font_size, color, kerning=kerning, bold=bold)
+    photo = ImageTk.PhotoImage(img)
+    canvas.create_image(*pos, anchor=anchor, image=photo)
+    if images is not None:
+        images.append(photo)
+    return photo
+
+# ============================================================================
+# COUNTRY INFO PANEL
+# ============================================================================
+
+class CountryInfoPanel:
+    """Displays detailed information about a selected country."""
+    
+    def __init__(self, canvas, root, state, image_refs, font_manager):
+        self.canvas = canvas
+        self.root = root
+        self.state = state
+        self.image_refs = image_refs
+        self.font_manager = font_manager
+        self.current_country = None
+    
+    def create(self, x: int, y: int):
+        """Create the country info panel at specified position."""
+        self.panel_x = x
+        self.panel_y = y
+        
+        # Panel background
+        bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "decision_window.dds"))
+        bg_img = SafeLoader.safe_load_image(bg_path, size=(300, 400))
+        
+        if bg_img:
+            photo = ImageTk.PhotoImage(bg_img)
+            self.image_refs.append(photo)
+            self.bg_id = self.canvas.create_image(x, y, anchor=tk.NW, image=photo)
+        else:
+            self.bg_id = self.canvas.create_rectangle(x, y, x + 300, y + 400, fill="#f0f0f0", outline="#666")
+        
+        # Country name label
+        self.name_label = tk.Label(self.root, text="Select a Country", font=("Arial", 12, "bold"), bg="#f0f0f0")
+        self.name_id = self.canvas.create_window(x + 150, y + 20, window=self.name_label)
+        
+        # Country flag
+        self.flag_canvas = tk.Canvas(self.root, width=64, height=48, highlightthickness=0, bg="#f0f0f0")
+        self.flag_id = self.canvas.create_window(x + 50, y + 50, window=self.flag_canvas, anchor=tk.NW)
+        
+        # Info labels
+        self.info_labels = {}
+        labels = [
+            ("Government:", "gov_label", y + 50),
+            ("Prestige Rank:", "prestige_label", y + 70),
+            ("Industry Rank:", "industry_label", y + 90),
+            ("Military Rank:", "military_label", y + 110),
+            ("Total Rank:", "total_label", y + 130),
+            ("Sphere Leader:", "sphere_label", y + 150),
+        ]
+        
+        for text, key, label_y in labels:
+            label = tk.Label(self.root, text=text, font=("Arial", 9), bg="#f0f0f0", justify=tk.LEFT)
+            label_id = self.canvas.create_window(x + 120, label_y, window=label, anchor=tk.W)
+            
+            value = tk.Label(self.root, text="", font=("Arial", 9), bg="#f0f0f0", justify=tk.LEFT)
+            value_id = self.canvas.create_window(x + 200, label_y, window=value, anchor=tk.W)
+            
+            self.info_labels[key] = {"label": label, "value": value}
+    
+    def update_country(self, country_tag: str):
+        """Update the panel with information for a specific country."""
+        self.current_country = country_tag
+        
+        if not self.state.save_file_text:
+            self.name_label.config(text="No save file loaded")
+            return
+        
+        # Get country data
+        country_name = LocalizationParser.get_country_name(self.state, country_tag, None)
+        self.name_label.config(text=country_name)
+        
+        # Update flag
+        self._update_flag(country_tag)
+        
+        # Update info labels with ranking data
+        self._update_info_labels(country_tag)
+    
+    def _update_flag(self, country_tag: str):
+        """Update the country flag display."""
+        self.flag_canvas.delete("all")
+        
+        flag = self._load_country_flag(country_tag)
+        if flag:
+            flag = flag.resize((64, 48), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(flag)
+            self.image_refs.append(photo)
+            self.flag_canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+        else:
+            self.flag_canvas.create_rectangle(0, 0, 64, 48, fill="gray", outline="black")
+            self.flag_canvas.create_text(32, 24, text=country_tag, font=("Arial", 10, "bold"))
+    
+    def _load_country_flag(self, tag: str) -> Optional[Image.Image]:
+        """Load flag image for a country tag."""
+        if not tag or tag == "---":
+            return None
+        
+        gov_name = self.state.country_governments.get(tag)
+        if gov_name:
+            flag_type = self.state.gov_to_flagtype.get(gov_name)
+            if flag_type:
+                variant_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}_{flag_type}.tga"))
+                flag = SafeLoader.safe_load_image(variant_path)
+                if flag:
+                    return flag
+        
+        base_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}.tga"))
+        return SafeLoader.safe_load_image(base_path)
+    
+    def _update_info_labels(self, country_tag: str):
+        """Update all information labels with country data."""
+        # Get government
+        government = self.state.country_governments.get(country_tag, "Unknown")
+        self.info_labels["gov_label"]["value"].config(text=government)
+    
+
+# ============================================================================
+# UI COMPONENTS
+# ============================================================================
+
+class FontManager:
+    """Manages fonts for the application."""
+    
+    def __init__(self, font_path: Optional[str] = None):
+        self.font_path = font_path or DEFAULT_FONT_PATH
+        self.font_18 = self._load_font(18)
+        self.font_16 = self._load_font(16)
+        self.font_14 = self._load_font(14)
+        self.font_12 = self._load_font(12)
+        self.font_10 = self._load_font(10)
+        self.font_8 = self._load_font(8)
+        
+        # Tkinter font objects
+        self.tk_font_18 = self._load_tk_font(18)
+        self.tk_font_16 = self._load_tk_font(16)
+        self.tk_font_14 = self._load_tk_font(14)
+        self.tk_font_12 = self._load_tk_font(12)
+        self.tk_font_10 = self._load_tk_font(10)
+        self.tk_font_8 = self._load_tk_font(8)
+    
+    def _load_font(self, size: int) -> ImageFont.ImageFont:
+        """Load a font of specified size for PIL."""
+        try:
+            if self.font_path and os.path.isfile(self.font_path):
+                return ImageFont.truetype(self.font_path, size)
+        except Exception:
+            pass
+        return ImageFont.load_default()
+    
+    def _load_tk_font(self, size: int) -> tuple:
+        """Load a font for tkinter widgets."""
+        try:
+            if self.font_path and os.path.isfile(self.font_path):
+                # Return a tuple that tkinter can use: (font_family, size, weight)
+                return (self.font_path, size, "normal")
+        except Exception:
+            pass
+        return ("Arial", size, "normal")
+
+
+class LayerCache:
+    """Caches pre-rendered UI layers for each tab."""
+    
+    def __init__(self, state: AppState):
+        self.state = state
+        self.cache: Dict[str, List[Tuple[ImageTk.PhotoImage, Tuple[int, int]]]] = {}
+        self.image_refs = []
+    
+    def build(self, tab_definitions: Dict):
+        """Build layer cache for all tabs."""
+        self.cache.clear()
+        self.image_refs.clear()
+        
+        for tab_name, tab_data in tab_definitions.items():
+            self.cache[tab_name] = []
+            
+            for layer in tab_data.get("layers", []):
+                img = self._process_layer(layer)
+                if img:
+                    photo = ImageTk.PhotoImage(img)
+                    self.image_refs.append(photo)
+                    self.cache[tab_name].append((photo, layer["position"]))
+    
+    def _process_layer(self, layer: Dict) -> Optional[Image.Image]:
+        """Process a single layer definition."""
+        rel_path = os.path.join("gfx", "interface", layer["path"])
+        full_path = self.state.get_modded_path(rel_path)
+        
+        cache_key = f"layer_{layer['path']}"
+        cached_img = self.state.image_cache.get(cache_key)
+        if cached_img:
+            img = cached_img
+        else:
+            img = SafeLoader.safe_load_image(full_path)
+            if img:
+                self.state.image_cache.set(cache_key, img)
+        
+        if not img:
+            return None
+        
+        if "crop" in layer:
+            img = ImageLoader.crop(img, **layer["crop"])
+        
+        if "size" in layer:
+            img = img.resize(layer["size"], Image.Resampling.LANCZOS)
+        
+        return img
+    
+    def get(self, tab_name: str) -> List[Tuple[ImageTk.PhotoImage, Tuple[int, int]]]:
+        """Get cached layers for a tab."""
+        return self.cache.get(tab_name, [])
+    
+    def clear(self):
+        """Clear cache and image references."""
+        self.cache.clear()
+        self.image_refs.clear()
+
+class ScrollableList:
+    """A scrollable list widget with custom scrollbar."""
+    
+    def __init__(self, parent_canvas: tk.Canvas, root: tk.Tk, state: AppState,
+                 x: int, y: int, width: int, height: int, scrollbar_assets: Dict,
+                 row_height: int = 24):
+        self.parent_canvas = parent_canvas
+        self.root = root
+        self.state = state
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.sb_assets = scrollbar_assets
+        self.row_height = row_height
+        self.scrollbar_images = []
+        
+        self.content_width = width - SCROLLBAR_WIDTH - 4
+        self.scroll_canvas = None
+        self.frame_inside = None
+        self.overlay_ids = []
+        self.thumb_state = {"height": 16, "photo": None, "base": scrollbar_assets.get("thumb_img")}
+        self.drag_state = {"active": False, "offset": 0}
+        
+    def create(self):
+        """Create the scrollable list."""
+        self._clear_previous()
+        self._create_scroll_canvas()
+        self._create_scrollbar()
+        self.root.after(50, self._update_thumb)
+    
+    def _clear_previous(self):
+        """Clear previous overlay elements."""
+        for overlay_id in self.overlay_ids:
+            try:
+                self.parent_canvas.delete(overlay_id)
+            except Exception:
+                pass
+        self.overlay_ids.clear()
+    
+    def _create_scroll_canvas(self):
+        """Create the scrollable canvas and inner frame."""
+        self.scroll_canvas = tk.Canvas(self.root, width=self.content_width, height=self.height,
+                                      bg=BG_COLOR, highlightthickness=0)
+        
+        self.frame_inside = tk.Frame(self.scroll_canvas, bg=BG_COLOR)
+        self.scroll_canvas.create_window((0, 0), window=self.frame_inside, anchor="nw")
+        
+        self.scroll_canvas.configure(yscrollincrement=self.row_height)
+        self.frame_inside.bind("<Configure>", self._on_configure)
+        self.scroll_canvas.configure(yscrollcommand=lambda f, l: self._update_thumb())
+        
+        win_id = self.parent_canvas.create_window(self.x, self.y, anchor=tk.NW, window=self.scroll_canvas)
+        self.overlay_ids.append(win_id)
+        
+        self.scroll_canvas.bind("<Enter>", lambda e: self.scroll_canvas.bind_all("<MouseWheel>", self._on_mousewheel))
+        self.scroll_canvas.bind("<Leave>", lambda e: self.scroll_canvas.unbind_all("<MouseWheel>"))
+    
+    def _create_scrollbar(self):
+        """Create the custom scrollbar."""
+        sb_x = self.x + (self.width - SCROLLBAR_WIDTH) - 4
+        sb_y = self.y
+        track_top = sb_y + 16
+        track_bottom = sb_y + self.height - 16
+        track_height = track_bottom - track_top
+        
+        self.track_top = track_top
+        self.track_bottom = track_bottom
+        self.track_height = track_height
+        self.sb_x = sb_x
+        
+        # Track tiles
+        if 'track_tile' in self.sb_assets:
+            tile = self.sb_assets['track_tile']
+            tile_height = tile.size[1]
+            for y_pos in range(track_top, track_bottom, tile_height):
+                tile_photo = ImageTk.PhotoImage(tile)
+                self.scrollbar_images.append(tile_photo)
+                tile_id = self.parent_canvas.create_image(sb_x + 5, y_pos, anchor=tk.NW, image=tile_photo)
+                self.overlay_ids.append(tile_id)
+        
+        track_rect = self.parent_canvas.create_rectangle(sb_x, track_top, sb_x + SCROLLBAR_WIDTH, track_bottom,
+                                                        outline="", fill="", tags=("scroll_track",))
+        self.overlay_ids.append(track_rect)
+        
+        # Up/down buttons
+        if 'up' in self.sb_assets:
+            up_photo = self.sb_assets['up']
+            up_id = self.parent_canvas.create_image(sb_x, sb_y, anchor=tk.NW, image=up_photo)
+        else:
+            up_id = self.parent_canvas.create_rectangle(sb_x, sb_y, sb_x + SCROLLBAR_WIDTH, sb_y + 16, 
+                                                       outline="#888", fill="#888")
+        
+        if 'down' in self.sb_assets:
+            down_photo = self.sb_assets['down']
+            down_id = self.parent_canvas.create_image(sb_x, sb_y + self.height - 16, anchor=tk.NW, image=down_photo)
+        else:
+            down_id = self.parent_canvas.create_rectangle(sb_x, sb_y + self.height - 16, sb_x + SCROLLBAR_WIDTH, 
+                                                         sb_y + self.height, outline="#888", fill="#888")
+        
+        self.overlay_ids.extend([up_id, down_id])
+        
+        # Thumb
+        thumb_photo = self._make_thumb_photo(16) if self.thumb_state["base"] else None
+        if thumb_photo:
+            self.thumb_id = self.parent_canvas.create_image(sb_x, track_top, anchor=tk.NW, image=thumb_photo)
+        else:
+            self.thumb_id = self.parent_canvas.create_rectangle(sb_x, track_top, sb_x + SCROLLBAR_WIDTH, track_top + 16, 
+                                                               outline="#666", fill="#666")
+        
+        self.overlay_ids.append(self.thumb_id)
+        self.thumb_state["photo"] = thumb_photo
+        
+        # Bind events
+        self.parent_canvas.tag_bind(up_id, "<Button-1>", 
+            lambda e: (self.scroll_canvas.yview_scroll(-1, "units"), self._update_thumb()))
+        self.parent_canvas.tag_bind(down_id, "<Button-1>", 
+            lambda e: (self.scroll_canvas.yview_scroll(1, "units"), self._update_thumb()))
+        self.parent_canvas.tag_bind("scroll_track", "<Button-1>", self._on_track_click)
+        self.parent_canvas.tag_bind(self.thumb_id, "<Button-1>", self._thumb_press)
+        self.parent_canvas.tag_bind(self.thumb_id, "<B1-Motion>", self._thumb_motion)
+        self.parent_canvas.tag_bind(self.thumb_id, "<ButtonRelease-1>", self._thumb_release)
+    
+    def _on_configure(self, event=None):
+        """Update scroll region when content changes."""
+        bbox = self.scroll_canvas.bbox("all")
+        if bbox:
+            self.scroll_canvas.configure(scrollregion=bbox)
+        self._update_thumb()
+    
+    def _make_thumb_photo(self, height: int) -> Optional[ImageTk.PhotoImage]:
+        """Create a thumb photo."""
+        base = self.thumb_state["base"]
+        if base is None:
+            return None
+        img = base.resize((16, 16), Image.Resampling.NEAREST)
+        return ImageTk.PhotoImage(img)
+    
+    def _set_thumb_height(self, height: int):
+        """Set the thumb to a specific height."""
+        height = max(16, min(height, self.track_height))
+        if self.thumb_state["base"] is None:
+            coords = self.parent_canvas.coords(self.thumb_id)
+            self.parent_canvas.coords(self.thumb_id, self.sb_x, coords[1],
+                                     self.sb_x + SCROLLBAR_WIDTH, self.track_top + height)
+            self.thumb_state["height"] = height
+            return
+        
+        if height == self.thumb_state["height"]:
+            return
+        
+        if self.thumb_state["photo"] is None:
+            new_photo = self._make_thumb_photo(16)
+            self.thumb_state["photo"] = new_photo
+            self.parent_canvas.itemconfig(self.thumb_id, image=new_photo)
+        
+        self.thumb_state["height"] = height
+    
+    def _update_thumb(self):
+        """Update thumb position and size based on scroll position."""
+        bbox = self.scroll_canvas.bbox("all")
+        if not bbox:
+            self._set_thumb_height(self.track_height)
+            self.parent_canvas.coords(self.thumb_id, self.sb_x, self.track_top)
+            return
+        
+        x1, y1, x2, y2 = bbox
+        content_height = max(1, y2 - y1)
+        
+        if content_height <= self.height:
+            self._set_thumb_height(self.track_height)
+            self.parent_canvas.coords(self.thumb_id, self.sb_x, self.track_top)
+            return
+        
+        visible_fraction = self.height / content_height
+        thumb_height = max(20, int(visible_fraction * self.track_height))
+        thumb_height = min(thumb_height, self.track_height)
+        self._set_thumb_height(thumb_height)
+        
+        first, last = self.scroll_canvas.yview()
+        travel = self.track_height - thumb_height
+        thumb_y = self.track_top + int(float(first) * max(0, travel))
+        self.parent_canvas.coords(self.thumb_id, self.sb_x, thumb_y)
+    
+    def _on_mousewheel(self, event):
+        """Handle mouse wheel scrolling."""
+        if hasattr(event, 'delta') and event.delta:
+            steps = int(-event.delta / 120)
+            self.scroll_canvas.yview_scroll(steps, "units")
+        elif hasattr(event, 'num'):
+            if event.num == 4:
+                self.scroll_canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                self.scroll_canvas.yview_scroll(1, "units")
+        self._update_thumb()
+    
+    def _on_track_click(self, event):
+        """Handle clicks on the scrollbar track."""
+        y = event.y
+        thumb_height = max(20, self.thumb_state["height"])
+        travel = max(1, self.track_height - thumb_height)
+        y_clamped = max(self.track_top, min(y - thumb_height // 2, self.track_bottom - thumb_height))
+        fraction = (y_clamped - self.track_top) / travel
+        fraction = max(0.0, min(1.0, fraction))
+        
+        bbox = self.scroll_canvas.bbox("all")
+        if bbox:
+            content_height = max(1, bbox[3] - bbox[1])
+            visible_rows = self.height / self.row_height
+            total_rows = content_height / self.row_height
+            row_index = int(fraction * (total_rows - visible_rows))
+            self.scroll_canvas.yview_moveto(row_index * self.row_height / content_height)
+        
+        self._update_thumb()
+    
+    def _thumb_press(self, event):
+        """Handle thumb press for dragging."""
+        self.drag_state["active"] = True
+        x, y = self.parent_canvas.coords(self.thumb_id)
+        self.drag_state["offset"] = event.y - int(y)
+    
+    def _thumb_motion(self, event):
+        """Handle thumb drag motion."""
+        if not self.drag_state["active"]:
+            return
+        
+        thumb_height = max(20, self.thumb_state["height"])
+        travel = max(1, self.track_height - thumb_height)
+        new_y = max(self.track_top, min(event.y - self.drag_state["offset"], self.track_bottom - thumb_height))
+        
+        self.parent_canvas.coords(self.thumb_id, self.sb_x, new_y)
+        fraction = (new_y - self.track_top) / travel
+        self.scroll_canvas.yview_moveto(fraction)
+    
+    def _thumb_release(self, event):
+        """Handle thumb release after dragging."""
+        self.drag_state["active"] = False
+        self._update_thumb()
+
+
+class WarAnalyzerGUI:
+    """Main GUI application for the war analyzer."""
+    
+    def __init__(self, state: AppState):
+        self.state = state
+        self.root = tk.Toplevel()
+        self.root.title("Victoria 2 GUI War Analyzer")
+        self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
+        self.root.resizable(False, False)
+        self.state.config = AppConfig.load()
+        self.canvas = tk.Canvas(self.root, width=WINDOW_WIDTH, height=WINDOW_HEIGHT, highlightthickness=0)
+        self.canvas.pack()
+        self.font_manager = FontManager()
+        self.layer_cache = LayerCache(state)
+        self.current_tab = "Tab1"
+        self.image_refs = []
+        self.tooltip = ToolTip(self.canvas)
+        
+        # Add this flag to track if auto-load has already run
+        self.auto_load_executed = False
+        
+        # Initialize CB icons
+        self._cb_icons = {}
+        self._cb_icons_loaded = False
+        self.cb_to_sprite = {}
+        
+        self.scrollbar_assets = self._load_scrollbar_assets()
+        self.tab_definitions = self._create_tab_definitions()
+        
+        self._load_government_data()
+        self.layer_cache.build(self.tab_definitions)
+        
+        # Pre-load CB icons
+        self._load_cb_icons()
+        
+        self._draw_tab_content(self.current_tab)
+        self.root.protocol("WM_DELETE_WINDOW", self.cleanup)
+        self._create_status_bar()
+        
+        # Auto-load last file and mod on startup if enabled
+        if self.state.config.auto_load_last and not self.auto_load_executed:
+            self._schedule_auto_load()
+
+    def _schedule_auto_load(self):
+        """Schedule auto-load to run once after a short delay."""
+        if self.auto_load_executed:
+            return
+            
+        # Load last mod
+        if self.state.config.last_mod and self.state.config.last_mod != "None":
+            self.state.mod_name = self.state.config.last_mod
+            # Update the mod label if it exists
+            if hasattr(self, 'mod_label'):
+                self.mod_label.config(text=f"Current Mod: {self.state.mod_name}")
+        
+        # Load last file
+        if self.state.config.recent_files:
+            last_file = self.state.config.recent_files[0]
+            if os.path.exists(last_file):
+                self.state.save_file_path = last_file
+                # Update the save label if it exists
+                if hasattr(self, 'save_label'):
+                    self.save_label.config(text=self.state.save_file_path)
+
+    def _load_recent_file(self, file_path):
+        """Load a file from the recent files list."""
+        if os.path.exists(file_path):
+            self.state.save_file_path = file_path
+            self.save_label.config(text=self.state.save_file_path)
+            # Move to top of recent files
+            if file_path in self.state.config.recent_files:
+                self.state.config.recent_files.remove(file_path)
+            self.state.config.recent_files.insert(0, file_path)
+            self.state.config.save()
+            self._refresh_recent_files()
+            
+            # Actually load the file
+            self.load_save()
+        else:
+            # Remove non-existent file from recent list
+            if file_path in self.state.config.recent_files:
+                self.state.config.recent_files.remove(file_path)
+                self.state.config.save()
+                self._refresh_recent_files()
+            messagebox.showwarning("File not found", f"The file no longer exists:\n{file_path}")
+
+    def _refresh_recent_files(self):
+        """Refresh the recent files display."""
+        if hasattr(self, 'recent_file_buttons'):
+            for btn in self.recent_file_buttons:
+                try:
+                    btn.destroy()
+                except:
+                    pass
+            self.recent_file_buttons.clear()
+            
+        recent_y = 350
+        for i, file_path in enumerate(self.state.config.recent_files):
+            if os.path.exists(file_path):
+                filename = os.path.basename(file_path)
+                btn = tk.Label(self.root, text=f"{i+1}. {filename}", 
+                            cursor="hand2", bg=BG_COLOR, font=("Arial", 9), fg="blue")
+                btn.bind("<Button-1>", lambda e, path=file_path: self._load_recent_file(path))
+                self.canvas.create_window(30, recent_y, anchor=tk.NW, window=btn)
+                self.recent_file_buttons.append(btn)
+                recent_y += 25
+
+    def _auto_load_file(self, file_path):
+        """Automatically load a save file on startup."""
+        try:
+            self.auto_load_executed = True
+            self.state.save_file_path = file_path
+            
+            # Reload assets with the correct mod first
+            if self.state.config.last_mod and self.state.config.last_mod != "None":
+                self._reload_assets()
+                self._reload_cb_icons()
+            
+            # Use the existing load_save logic but without message boxes for auto-load
+            if not self.state._wars_data or not self.state.save_file_text:  # Changed to save_file_text
+                self._load_government_data()
+                
+                wars, full_text = OptimizedSavefileParser.parse_wars(self.state.save_file_path)
+                self.state._wars_data = wars
+                self.state.save_file_text = full_text  # Set the PUBLIC field
+                
+                self.state._parsed_country_cultures, self.state._parsed_country_governments = CultureLeaderMapper.detect_cultures_and_governments(
+                    full_text, self.state.gov_index_map
+                )
+                
+                self.state._parsed_great_nations = OptimizedSavefileParser.parse_great_nations(full_text)
+                self.state.localization_names = LocalizationParser.parse_localization_files(self.state)
+            
+            self.state.filtered_wars = self.state._wars_data[:]
+            self.state.selected_countries.clear()
+            self.state.selected_war_index = None
+            
+            # Switch to wars tab after auto-load
+            self._on_tab_click("Tab2")
+            
+        except Exception:
+            # Silently handle auto-load failures
+            pass
+
+    def load_save(self):
+        """Load the currently selected save file."""
+        if not os.path.isfile(self.state.save_file_path):
+            messagebox.showwarning("No file", "Please select a valid save file first.")
+            return
+        
+        try:
+            messagebox.showinfo("Loading", "Parsing save file... This may take a moment.")
+            
+            # Only parse if we haven't already
+            if not self.state._wars_data or not self.state.save_file_text:
+                self._load_government_data()
+                self._reload_cb_icons()
+                
+                # Parse wars and full text
+                wars, full_text = OptimizedSavefileParser.parse_wars(self.state.save_file_path)
+                self.state._wars_data = wars
+                self.state.save_file_text = full_text
+                
+                # Detect cultures and governments
+                self.state._parsed_country_cultures, self.state._parsed_country_governments = CultureLeaderMapper.detect_cultures_and_governments(
+                    full_text, self.state.gov_index_map
+                )
+                
+                # Parse great nations
+                self.state._parsed_great_nations = OptimizedSavefileParser.parse_great_nations(full_text)
+                
+                # Load localization
+                self.state.localization_names = LocalizationParser.parse_localization_files(self.state)
+            
+            # Always reset filters and selection
+            self.state.filtered_wars = self.state._wars_data[:]
+            self.state.selected_countries.clear()
+            self.state.selected_war_index = None
+            
+            self._on_tab_click("Tab2")
+            messagebox.showinfo("Loaded", f"Loaded {len(self.state._wars_data)} wars and data for {len(self.state._parsed_country_governments)} countries.")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load save: {e}")
+    
+    def _create_tab_definitions(self) -> Dict:
+        """Define all tab layouts."""
+        base_layers = [
+            {"path": "main_bg.dds", "position": (0, 0), "size": (342, WINDOW_HEIGHT),
+             "crop": {"left": 71, "top": 65, "right": 75+680, "bottom": 66}},
+            {"path": "main_bg.dds", "position": (342, 0), "size": (342, WINDOW_HEIGHT),
+             "crop": {"left": 71+680, "top": 65, "right": 75, "bottom": 66}},
+            {"path": "diplomacy_bg.dds", "position": (17, 14),
+             "size": (988-338, 616), "crop": {"left": 0, "top": 0, "right": 338, "bottom": 0}},             
+        ]
+        
+        return {
+            "Tab1": {
+                "label": "Settings",
+                "layers": base_layers + [
+                    {"path": "politics_tab_button.dds", "position": (24, 18), "size": (154, 36),
+                     "crop": {"left": 154, "top": 0, "right": 0, "bottom": 0}},
+                    {"path": "politics_tab_button.dds", "position": (184, 18), "size": (154, 36),
+                     "crop": {"left": 0, "top": 0, "right": 154, "bottom": 0}},
+                    {"path": "politics_tab_button.dds", "position": (344, 18), "size": (154, 36),
+                     "crop": {"left": 0, "top": 0, "right": 154, "bottom": 0}},
+                    {"path": "politics_tab_button.dds", "position": (504, 18), "size": (154, 36),
+                     "crop": {"left": 0, "top": 0, "right": 154, "bottom": 0}},
+                ],
+            },
+            "Tab2": {
+                "label": "Show wars",
+                "layers": base_layers + [
+                    {"path": "politics_tab_button.dds", "position": (184, 18), "size": (154, 36),
+                     "crop": {"left": 154, "top": 0, "right": 0, "bottom": 0}},
+                    {"path": "politics_tab_button.dds", "position": (24, 18), "size": (154, 36),
+                     "crop": {"left": 0, "top": 0, "right": 154, "bottom": 0}},
+                    {"path": "politics_tab_button.dds", "position": (344, 18), "size": (154, 36),
+                     "crop": {"left": 0, "top": 0, "right": 154, "bottom": 0}},
+                    {"path": "politics_tab_button.dds", "position": (504, 18), "size": (154, 36),
+                     "crop": {"left": 0, "top": 0, "right": 154, "bottom": 0}},
+                ],
+            },
+            "Tab3": {
+                "label": "War Details",
+                "layers": base_layers + [
+                    {"path": "politics_tab_button.dds", "position": (344, 18), "size": (154, 36),
+                     "crop": {"left": 154, "top": 0, "right": 0, "bottom": 0}},
+                    {"path": "politics_tab_button.dds", "position": (24, 18), "size": (154, 36),
+                     "crop": {"left": 0, "top": 0, "right": 154, "bottom": 0}},
+                    {"path": "politics_tab_button.dds", "position": (184, 18), "size": (154, 36),
+                     "crop": {"left": 0, "top": 0, "right": 154, "bottom": 0}},
+                    {"path": "politics_tab_button.dds", "position": (504, 18), "size": (154, 36),
+                     "crop": {"left": 0, "top": 0, "right": 154, "bottom": 0}},
+                ],
+            },
+        }
+    
+
+    def _on_any_flag_enter(self, event, country_tag):
+        """Handle mouse entering any flag."""
+        if not hasattr(self, '_flag_tooltip_cache'):
+            self._flag_tooltip_cache = {}
+        
+        if country_tag not in self._flag_tooltip_cache:
+            gov = self.state.country_governments.get(country_tag, "Unknown")
+            country_name = LocalizationParser.get_country_name(self.state, country_tag, gov)
+            self._flag_tooltip_cache[country_tag] = country_name
+        
+        tooltip_text = self._flag_tooltip_cache[country_tag]
+        
+        # FIX: Just pass the screen coordinates directly, no canvas offset
+        screen_x = event.x_root + 10  # Small offset from cursor
+        screen_y = event.y_root + 10  # Small offset from cursor
+        self.tooltip.showtip(tooltip_text, screen_x, screen_y)
+        
+        if hasattr(self, 'country_panel'):
+            self.country_panel.update_country(country_tag)
+
+    def _on_any_flag_motion(self, event, country_tag):
+        """Handle mouse motion over any flag."""
+        # FIX: Just pass the screen coordinates directly
+        screen_x = event.x_root + 10  # Small offset from cursor
+        screen_y = event.y_root + 10  # Small offset from cursor
+        self.tooltip.showtip(self._flag_tooltip_cache.get(country_tag, ""), screen_x, screen_y)
+
+    def _on_any_flag_leave(self, event):
+        """Handle mouse leaving any flag."""
+        self.tooltip.hidetip()
+    
+    def _cache_flag_tooltips(self, war):
+        """Pre-cache all tooltip texts for flags in this war."""
+        self._flag_tooltip_cache = {}
+        
+        # Cache all attacker flags
+        for tag in war.attackers:
+            if tag and tag != "---":
+                gov = self.state.country_governments.get(tag, "Unknown")
+                country_name = LocalizationParser.get_country_name(self.state, tag, gov)
+                self._flag_tooltip_cache[tag] = country_name
+        
+        # Cache all defender flags  
+        for tag in war.defenders:
+            if tag and tag != "---":
+                gov = self.state.country_governments.get(tag, "Unknown")
+                country_name = LocalizationParser.get_country_name(self.state, tag, gov)
+                self._flag_tooltip_cache[tag] = country_name
+
+    def _load_scrollbar_assets(self) -> Dict:
+        """Load scrollbar graphics."""
+        assets = {}
+        
+        def crop_right_16(rel_path: str) -> Optional[Image.Image]:
+            full_path = self.state.get_modded_path(os.path.join("gfx", "interface", rel_path))
+            img = SafeLoader.safe_load_image(full_path)
+            if not img:
+                return None
+            cropped = ImageLoader.crop(img, right=img.width - 16)
+            return cropped.resize((16, 16), Image.Resampling.NEAREST)
+        
+        up_img = crop_right_16("scrollbar_upbutton.dds")
+        down_img = crop_right_16("scrollbar_downbutton.dds")
+        thumb_img = crop_right_16("scrollbar_slider_2.dds")
+        
+        if up_img:
+            assets['up'] = ImageTk.PhotoImage(up_img)
+            self.image_refs.append(assets['up'])
+        if down_img:
+            assets['down'] = ImageTk.PhotoImage(down_img)
+            self.image_refs.append(assets['down'])
+        if thumb_img:
+            assets['thumb_img'] = thumb_img
+            assets['thumb'] = ImageTk.PhotoImage(thumb_img)
+            self.image_refs.append(assets['thumb'])
+        
+        track_path = self.state.get_modded_path(os.path.join("gfx", "interface", "scrollbar_sliderbackground_2.tga"))
+        track = SafeLoader.safe_load_image(track_path)
+        if track:
+            tile = ImageLoader.crop(track, top=1)
+            if tile and tile.width > 0 and tile.height > 0:
+                assets['track_tile'] = tile
+        
+        return assets
+    
+    def _load_government_data(self):
+        """Load government definitions with caching."""
+        if (self.state._government_cache_loaded and 
+            self.state.gov_to_flagtype and 
+            self.state.gov_index_map):
+            return  # Already loaded
+        
+        govs_path = self.state.get_modded_path(os.path.join("common", "governments.txt"))
+        if os.path.exists(govs_path):
+            gov_to_flag, gov_index = GovernmentParser.parse(govs_path)
+            self.state.gov_to_flagtype = gov_to_flag
+            self.state.gov_index_map = gov_index
+            self.state._government_cache_loaded = True
+    
+    def _load_cb_icons(self):
+        """Load and cache CB icons from the sprite sheet with proper mod support."""
+        if hasattr(self, '_cb_icons_loaded') and self._cb_icons_loaded:
+            return
+        
+        self._cb_icons = {}
+        self._cb_icons_loaded = True
+        
+        # Parse CB types to get sprite indices
+        self.cb_to_sprite = CBTypesParser.parse_cb_types(self.state)
+        
+        # Try to load from mod first, then base game
+        icons_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_wargoal_icons.dds"))
+        
+        sprite_sheet = SafeLoader.safe_load_image(icons_path)
+        
+        if not sprite_sheet:
+            return
+        
+        # Get sprite sheet dimensions
+        sheet_width, sheet_height = sprite_sheet.size
+        
+        # Victoria 2 CB icons are ALWAYS 24px wide
+        icon_width = 24
+        icon_height = sheet_height  # Full height of the sprite sheet
+        
+        # Create icons for each CB type
+        for cb_name, sprite_index in self.cb_to_sprite.items():
+            # FIX: Victoria 2 sprite indices are 1-based, but we need 0-based for cropping
+            # sprite_index=1 should be position 0-23, sprite_index=2 should be position 24-47, etc.
+            x_pos = (sprite_index - 1) * icon_width
+            
+            # Make sure we don't go beyond the sprite sheet bounds
+            if x_pos + icon_width <= sheet_width and x_pos >= 0:
+                try:
+                    # Extract the 24x(sheet_height) icon and ensure transparency
+                    icon = sprite_sheet.crop((x_pos, 0, x_pos + icon_width, icon_height))
+                    # Convert to RGBA if not already to ensure transparency
+                    if icon.mode != 'RGBA':
+                        icon = icon.convert('RGBA')
+                    self._cb_icons[cb_name] = icon
+                except Exception:
+                    # Silently continue if one icon fails to load
+                    pass
+
+    def _get_cb_icon(self, cb_name: str) -> Optional[Image.Image]:
+        """Get the CB icon with mod-aware reloading."""
+        # Remove the complex mod change detection - keep it simple
+        current_mod = self.state.mod_name
+        if not hasattr(self, '_last_mod_loaded') or self._last_mod_loaded != current_mod:
+            self._last_mod_loaded = current_mod
+            self._cb_icons_loaded = False  # Just mark as not loaded
+        
+        if not hasattr(self, '_cb_icons') or not self._cb_icons_loaded:
+            self._load_cb_icons()
+        
+        # Try exact match first
+        if cb_name in self._cb_icons:
+            icon = self._cb_icons[cb_name]
+            # Ensure the icon has transparency
+            if icon.mode != 'RGBA':
+                icon = icon.convert('RGBA')
+            return icon
+        
+        # Try case-insensitive match
+        cb_name_lower = cb_name.lower()
+        for stored_cb, icon in self._cb_icons.items():
+            if stored_cb.lower() == cb_name_lower:
+                if icon.mode != 'RGBA':
+                    icon = icon.convert('RGBA')
+                return icon
+        
+        # Try partial match (in case CB names have prefixes/suffixes)
+        for stored_cb, icon in self._cb_icons.items():
+            if cb_name_lower in stored_cb.lower() or stored_cb.lower() in cb_name_lower:
+                if icon.mode != 'RGBA':
+                    icon = icon.convert('RGBA')
+                return icon
+        
+        return None
+
+    def _reload_cb_icons(self):
+        # Clear the cache to force reload
+        if hasattr(self, '_cb_icons_loaded'):
+            self._cb_icons_loaded = False
+        if hasattr(self, '_cb_icons'):
+            self._cb_icons.clear()
+        if hasattr(self, 'cb_to_sprite'):
+            self.cb_to_sprite.clear()
+        
+        # Reload the icons
+        self._load_cb_icons()
+
+    def _extract_cb_name_from_goal(self, goal_text: str) -> Optional[str]:
+        """Extract the CB name from goal description text with better matching."""
+        if not goal_text:
+            return None
+        
+        # Common Victoria 2 CB names - expanded list
+        common_cbs = [
+            'acquire_state', 'conquer_state', 'liberate_state', 'take_state',
+            'free_people', 'free_substate', 'make_puppet', 'make_vassal',
+            'annex', 'take_capital', 'humiliate', 'cut_down_to_size',
+            'disarmament', 'destroy_forts', 'destroy_navies', 'war_reparations',
+            'return_state', 'core_state', 'unification', 'cleansing_of_heretics',
+            'crusade', 'holy_war', 'colonial_war', 'place_in_sun',
+            'imperialism', 'containment', 'install_communist_gov',
+            'install_fascist_gov', 'install_democratic_gov', 'add_to_sphere',
+            'remove_from_sphere', 'assert_hegemony', 'crisis_war'
+        ]
+        
+        goal_lower = goal_text.lower()
+        
+        # First, try direct matching with the CB names we have loaded
+        for cb_name in self._cb_icons.keys():
+            if cb_name.lower() in goal_lower:
+                return cb_name
+        
+        # Then try with common CB names
+        for cb in common_cbs:
+            if cb in goal_lower:
+                return cb
+        
+        # Try to extract from common patterns in goal text
+        patterns = [
+            r'(\w+)\s+against',  # "cb_name against"
+            r'(\w+)\s+\(State',  # "cb_name (State"
+            r'(\w+)\s+from',     # "cb_name from"  
+            r'(\w+)\s+on',       # "cb_name on"
+            r'^([A-Za-z_]+)\b',  # Start of string
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, goal_text)
+            if match:
+                potential_cb = match.group(1).lower()
+                # Check if this matches any known CB
+                for cb_name in self._cb_icons.keys():
+                    if cb_name.lower() == potential_cb:
+                        return cb_name
+                
+                for cb in common_cbs:
+                    if cb == potential_cb:
+                        return cb
+        
+        # Last resort: try partial matching
+        words = re.findall(r'\b[a-z_]+\b', goal_lower)
+        for word in words:
+            for cb_name in self._cb_icons.keys():
+                if word in cb_name.lower() or cb_name.lower() in word:
+                    return cb_name
+        
+        return None
+
+    def _draw_war_header_simple(self, war: War, x: int, y: int):
+        """Draw simplified war header with defenders on the right side."""
+        # War name - using the same method as WarList but in white, moved UP
+        title_strip = Image.new("RGBA", (638, 28), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(title_strip)
+        bbox = self.font_manager.font_18.getbbox(war.name)
+        text_width = bbox[2] - bbox[0]
+        text_x = max(0, (638 - text_width) // 2)
+        text_y = 0
+        
+        # Draw white text with the custom font - BOLD EFFECT by rendering twice
+        # First pass (base)
+        draw.text((text_x, text_y), war.name, font=self.font_manager.font_18, fill=(255, 255, 255, 255))
+        # Second pass (slight offset for bold effect)
+        draw.text((text_x + 1, text_y), war.name, font=self.font_manager.font_18, fill=(255, 255, 255, 255))
+        
+        photo = ImageTk.PhotoImage(title_strip)
+        self.image_refs.append(photo)
+        name_id = self.canvas.create_image(x + 319, y - 22, anchor=tk.N, image=photo)
+        self._tab3_widgets.append(name_id)
+        
+        # Load flag overlay for normal flags
+        overlay_path = self.state.get_modded_path(os.path.join("gfx", "interface", "flag_overlay_new.tga"))
+        flag_overlay = SafeLoader.safe_load_image(overlay_path, size=(FLAG_WIDTH, FLAG_HEIGHT))
+        
+        # Draw attackers section on LEFT side - BLACK text
+        attackers_label = tk.Label(
+            self.root,
+            text="Attackers:",
+            font=("Arial", 10, "bold"),
+            bg=BG_COLOR,
+            fg="black"
+        )
+        
+        # Draw attackers flags on LEFT - adjust Y position for larger first flag
+        self._draw_simple_flag_row(war.attackers, war.original_attacker, x - 3, y + 50, flag_overlay, is_attacker=True)
+        
+        # Draw defenders section on RIGHT side - BLACK text
+        defenders_label = tk.Label(
+            self.root,
+            text="Defenders:",
+            font=("Arial", 10, "bold"),
+            bg=BG_COLOR,
+            fg="black"
+        )
+        
+        # Draw defenders flags on RIGHT - adjust Y position for larger first flag
+        self._draw_simple_flag_row(war.defenders, war.original_defender, x + 421, y + 50, flag_overlay, is_attacker=False)
+
+    def _draw_single_secondary_flag(self, x_pos, y_pos, tag, flag_overlay):
+        """Draw a single secondary flag at the specified position."""
+        # Use normal rectangular flag loading for secondary flags
+        flag = self._load_country_flag_for_display(tag, circular=False)
+        
+        # CREATE FLAG CANVAS ITEM
+        if flag:
+            # Apply normal overlay if available
+            if flag_overlay:
+                flag = flag.copy()
+                flag.alpha_composite(flag_overlay)
+            
+            photo = ImageTk.PhotoImage(flag)
+            self.image_refs.append(photo)
+            
+            # Draw directly on main canvas
+            flag_id = self.canvas.create_image(x_pos, y_pos, anchor=tk.NW, image=photo)
+            self._tab3_widgets.append(flag_id)
+        else:
+            # Create a placeholder if flag image failed to load
+            placeholder = Image.new("RGBA", (FLAG_WIDTH, FLAG_HEIGHT), (128, 128, 128, 255))
+            draw = ImageDraw.Draw(placeholder)
+            draw.rectangle([0, 0, FLAG_WIDTH, FLAG_HEIGHT], outline="black")
+            text = tag if tag else "?"
+            try:
+                bbox = self.font_manager.font_8.getbbox(text)
+                text_x = (FLAG_WIDTH - (bbox[2] - bbox[0])) // 2
+                text_y = (FLAG_HEIGHT - (bbox[3] - bbox[1])) // 2
+                draw.text((text_x, text_y), text, font=self.font_manager.font_8, fill="white")
+            except:
+                pass
+            
+            photo = ImageTk.PhotoImage(placeholder)
+            self.image_refs.append(photo)
+            flag_id = self.canvas.create_image(x_pos, y_pos, anchor=tk.NW, image=photo)
+            self._tab3_widgets.append(flag_id)
+        
+        # ADD TOOLTIP AND HOVER FUNCTIONALITY TO SECONDARY FLAGS - MAKE SURE THIS EXISTS
+        self.canvas.tag_bind(flag_id, "<Enter>", lambda e, t=tag: self._on_any_flag_enter(e, t))
+        self.canvas.tag_bind(flag_id, "<Leave>", self._on_any_flag_leave)
+        self.canvas.tag_bind(flag_id, "<Motion>", lambda e, t=tag: self._on_any_flag_motion(e, t))
+
+    def _draw_simple_flag_row(self, tags: List[str], highlight: Optional[str], x: int, y: int, flag_overlay: Optional[Image.Image], is_attacker: bool):
+        """Draw a row of flags with the first flag larger and secondary flags below in multiple rows."""
+        tags = [t for t in tags if t and t != "---"]
+        if not tags:
+            return
+        
+        # Different rules for attackers vs defenders
+        if is_attacker:
+            first_row_max_width = 125  # Attackers: 125px for first row
+            max_total_width = 124 + 174  # Attackers: 124 + 174 = 298px total
+        else:
+            first_row_max_width = 150  # Defenders: 150px for first row  
+            max_total_width = 149 + 174  # Defenders: 149 + 174 = 323px total
+        
+        # Reorder to put highlighted tag first
+        ordered = list(tags)
+        if highlight in ordered:
+            ordered.remove(highlight)
+            ordered.insert(0, highlight)
+        
+        # ALWAYS DRAW FIRST FLAG (big flag)
+        first_tag = ordered[0]
+        flag_x = x
+        flag_y = y
+
+        # Load flag with appropriate overlay based on Great Power status
+        flag = self._load_country_flag_for_display(first_tag, circular=True, gp_size=True)
+        if flag:
+            photo = ImageTk.PhotoImage(flag)
+            self.image_refs.append(photo)
+            
+            flag_id = self.canvas.create_image(flag_x, flag_y, anchor=tk.NW, image=photo, tags=(f"country_{first_tag}",))
+            self._tab3_widgets.append(flag_id)
+        else:
+            # Fallback without overlay
+            placeholder = Image.new("RGBA", (52, 44), (128, 128, 128, 255))
+            draw = ImageDraw.Draw(placeholder)
+            draw.rectangle([0, 0, 52, 44], outline="black")
+            text = first_tag if first_tag else "?"
+            try:
+                bbox = self.font_manager.font_8.getbbox(text)
+                text_x = (52 - (bbox[2] - bbox[0])) // 2
+                text_y = (44 - (bbox[3] - bbox[1])) // 2
+                draw.text((text_x, text_y), text, font=self.font_manager.font_8, fill="white")
+            except:
+                pass
+            
+            photo = ImageTk.PhotoImage(placeholder)
+            self.image_refs.append(photo)
+            flag_id = self.canvas.create_image(flag_x + 6, flag_y + 8, anchor=tk.NW, image=photo, tags=(f"country_{first_tag}",))
+            self._tab3_widgets.append(flag_id)
+
+        # ADD COUNTRY NAME TEXT BELOW THE BIG FLAG
+        if first_tag:
+            # Get country name
+            gov = self.state.country_governments.get(first_tag, "Unknown")
+            country_name = LocalizationParser.get_country_name(self.state, first_tag, gov)
+            
+            # Truncate long names (more than 20 characters)
+            if len(country_name) > 22:
+                display_name = country_name[:20] + "..."
+            else:
+                display_name = country_name
+
+            # Create text strip with Garamond font
+            name_strip = Image.new("RGBA", (145, 16), (0, 0, 0, 0))  # Wider to fit longer names
+            draw_name = ImageDraw.Draw(name_strip)
+            
+            # Use Arial Bold font
+            try:
+                arial_font = ImageFont.truetype("arialbd.ttf", 12)
+            except:
+                try:
+                    arial_font = ImageFont.truetype("Arial Bold", 12)
+                except:
+                    arial_font = ImageFont.load_default()
+            
+            # Draw white text
+            draw_name.text((0, 0), display_name, font=arial_font, fill=(255, 255, 255, 255))
+            
+            photo_name = ImageTk.PhotoImage(name_strip)
+            self.image_refs.append(photo_name)
+            
+            # Position text below the flag
+            name_x = flag_x + 55
+            name_y = flag_y + 9
+            name_id = self.canvas.create_image(name_x, name_y, anchor=tk.NW, image=photo_name)
+            self._tab3_widgets.append(name_id)
+
+        # Bind events directly to the flag image
+        self.canvas.tag_bind(flag_id, "<Enter>", lambda e, t=first_tag: self._on_any_flag_enter(e, t))
+        self.canvas.tag_bind(flag_id, "<Leave>", self._on_any_flag_leave)
+        self.canvas.tag_bind(flag_id, "<Motion>", lambda e, t=first_tag: self._on_any_flag_motion(e, t))
+        
+        # Draw remaining flags BELOW the big flag in multiple rows (only if they exist)
+        remaining_tags = ordered[1:]
+        if remaining_tags:
+            # Configuration for secondary flags
+            row_height = 20
+            min_spacing = 4  # Minimum spacing between flags
+            max_spacing = 25  # Maximum spacing between flags
+            
+            # Calculate total space needed for all flags with maximum spacing
+            total_flags = len(remaining_tags)
+            total_width_needed_max = total_flags * max_spacing
+            
+            if total_width_needed_max <= max_total_width:
+                # All flags fit with maximum spacing - use max spacing
+                actual_spacing = max_spacing
+            else:
+                # Calculate the optimal spacing to fill the total available width
+                actual_spacing = max_total_width / total_flags
+                # Constrain within min/max bounds
+                actual_spacing = max(min_spacing, min(max_spacing, actual_spacing))
+            
+            # Now distribute flags between the two rows with this spacing
+            # First row can hold flags up to first_row_max_width
+            max_flags_first_row = int(first_row_max_width // actual_spacing)
+            
+            first_row = remaining_tags[:max_flags_first_row]
+            second_row = remaining_tags[max_flags_first_row:]
+            
+            # Calculate starting positions
+            first_row_width = len(first_row) * actual_spacing
+            first_row_start_x = x + 53  # Align with big flag
+            
+            second_row_width = len(second_row) * actual_spacing
+            second_row_start_x = x + 3
+            
+            start_y = y + 35
+            
+            # Draw first row
+            if first_row:
+                for col_index, tag in enumerate(first_row):
+                    flag_x_pos = first_row_start_x + col_index * actual_spacing
+                    flag_y_pos = start_y
+                    
+                    self._draw_single_secondary_flag(flag_x_pos, flag_y_pos, tag, flag_overlay)
+            
+            # Draw second row
+            if second_row:
+                for col_index, tag in enumerate(second_row):
+                    flag_x_pos = second_row_start_x + col_index * actual_spacing
+                    flag_y_pos = start_y + row_height
+                    
+                    self._draw_single_secondary_flag(flag_x_pos, flag_y_pos, tag, flag_overlay)
+
+    def _load_country_flag_for_display(self, tag: str, circular: bool = False, gp_size: bool = False) -> Optional[Image.Image]:
+        """Load flag image for display with appropriate overlay based on Great Power status."""
+        if not tag or tag == "---":
+            return None
+        
+        cache_key = f"flag_{tag}_gp" if (circular and gp_size) else f"flag_{tag}_circular" if circular else f"flag_{tag}"
+        cached_flag = self.state.image_cache.get(cache_key)
+        if cached_flag:
+            if gp_size:
+                return cached_flag  # Already at GP size
+            return cached_flag.resize((FLAG_WIDTH, FLAG_HEIGHT), Image.Resampling.LANCZOS)
+        
+        gov_name = self.state.country_governments.get(tag)
+        if gov_name:
+            flag_type = self.state.gov_to_flagtype.get(gov_name)
+            if flag_type:
+                variant_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}_{flag_type}.tga"))
+                flag = SafeLoader.safe_load_image(variant_path)
+                if flag:
+                    if circular:
+                        if gp_size:
+                            # Apply circular mask to both GP and secondary
+                            flag = self._apply_circular_mask(flag, (40, 28))
+                            # Then apply appropriate overlay frame
+                            if tag in self.state.great_nations:
+                                # Great Power - use GP overlay frame
+                                flag = self._apply_gp_overlay(flag, (52, 44))
+                            else:
+                                # Secondary power - use secondary overlay frame
+                                flag = self._apply_secondary_overlay(flag, (46, 44))
+                        else:
+                            # Use circular mask at normal flag size
+                            flag = self._apply_circular_mask(flag, (FLAG_WIDTH, FLAG_HEIGHT))
+                    elif not gp_size:
+                        flag = flag.resize((FLAG_WIDTH, FLAG_HEIGHT), Image.Resampling.LANCZOS)
+                    self.state.image_cache.set(cache_key, flag)
+                    return flag
+        
+        base_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}.tga"))
+        flag = SafeLoader.safe_load_image(base_path)
+        if flag:
+            if circular:
+                if gp_size:
+                    # Apply circular mask to both GP and secondary
+                    flag = self._apply_circular_mask(flag, (40, 28))
+                    # Then apply appropriate overlay frame
+                    if tag in self.state.great_nations:
+                        # Great Power - use GP overlay frame
+                        flag = self._apply_gp_overlay(flag, (52, 44))
+                    else:
+                        # Secondary power - use secondary overlay frame
+                        flag = self._apply_secondary_overlay(flag, (46, 44))
+                else:
+                    # Use circular mask at normal flag size
+                    flag = self._apply_circular_mask(flag, (FLAG_WIDTH, FLAG_HEIGHT))
+            elif not gp_size:
+                flag = flag.resize((FLAG_WIDTH, FLAG_HEIGHT), Image.Resampling.LANCZOS)
+            self.state.image_cache.set(cache_key, flag)
+        return flag
+
+    def _apply_gp_overlay(self, flag_img: Image.Image, overlay_size: Tuple[int, int] = (52, 44)) -> Image.Image:
+        """Apply Great Power overlay frame using diplo_gp_overlay.dds."""
+        # Load GP overlay frame
+        overlay_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_gp_overlay.dds"))
+        overlay = SafeLoader.safe_load_image(overlay_path, size=overlay_size)
+        
+        if not overlay:
+            # Fallback: create a simple GP-style overlay
+            overlay = Image.new("RGBA", overlay_size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
+            # Draw a fancy GP-style frame
+            draw.ellipse([0, 0, overlay_size[0], overlay_size[1]], outline="gold", width=3)
+        
+        # Create composite image with flag and overlay
+        composite = Image.new("RGBA", overlay_size, (0, 0, 0, 0))
+        
+        # Center the flag within the overlay (flag is 40x28, overlay is 52x44)
+        flag_x = (overlay_size[0] - 40) // 2
+        flag_y = (overlay_size[1] - 28) // 2
+        composite.paste(flag_img, (flag_x, flag_y))
+        
+        # Add the overlay frame
+        composite.alpha_composite(overlay)
+        
+        return composite
+
+    def _apply_secondary_overlay(self, flag_img: Image.Image, overlay_size: Tuple[int, int] = (46, 44)) -> Image.Image:
+        """Apply secondary power overlay frame using diplo_2nd_overlay.dds with 3px right offset for both flag and overlay."""
+        # Load secondary overlay frame
+        overlay_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_2nd_overlay.dds"))
+        overlay = SafeLoader.safe_load_image(overlay_path, size=overlay_size)
+        
+        if not overlay:
+            # Fallback: create a simple secondary-style overlay
+            overlay = Image.new("RGBA", overlay_size, (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
+            # Draw a simple rectangular frame for secondary powers
+            draw.rectangle([0, 0, overlay_size[0], overlay_size[1]], outline="silver", width=2)
+        
+        # Create a larger canvas to accommodate the 3px right offset
+        # The final image will be 49px wide (46 + 3) to keep everything aligned
+        canvas_width = overlay_size[0] + 3  # 46 + 3 = 49
+        canvas_height = overlay_size[1]     # 44
+        
+        composite = Image.new("RGBA", (canvas_width, canvas_height), (0, 0, 0, 0))
+        
+        # Position both flag and overlay with 3px right offset
+        flag_x = 3 + (overlay_size[0] - 40) // 2  # 3px offset + centered within overlay
+        flag_y = (overlay_size[1] - 28) // 2
+        
+        overlay_x = 3  # Overlay also gets 3px right offset
+        
+        # Paste the flag
+        composite.paste(flag_img, (flag_x, flag_y))
+        
+        # Add the overlay frame
+        composite.alpha_composite(overlay, (overlay_x, 0))
+        
+        return composite
+
+    def _apply_circular_mask(self, flag_img: Image.Image, mask_size: Tuple[int, int] = (40, 28)) -> Image.Image:
+        """Apply circular mask to a flag image using diplo_gp_mask.tga."""
+        # Load the circular mask (used for both GP and secondary)
+        mask_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_gp_mask.tga"))
+        mask = SafeLoader.safe_load_image(mask_path, size=mask_size)
+        
+        if not mask:
+            # Fallback: create a simple circular mask
+            mask = Image.new("L", mask_size, 0)
+            draw = ImageDraw.Draw(mask)
+            draw.ellipse([0, 0, mask_size[0], mask_size[1]], fill=255)
+        else:
+            # Extract the alpha channel for the mask
+            if mask.mode == 'RGBA':
+                mask = mask.getchannel('A')
+            elif mask.mode == 'LA':
+                mask = mask.getchannel('A') 
+            else:
+                mask = mask.convert('L')
+        
+        # Resize flag to match mask size
+        flag_resized = flag_img.resize(mask_size, Image.Resampling.LANCZOS)
+        
+        # Ensure flag has alpha channel
+        if flag_resized.mode != 'RGBA':
+            flag_resized = flag_resized.convert('RGBA')
+        
+        # Apply the circular mask to the flag
+        flag_resized.putalpha(mask)
+        
+        return flag_resized
+
+    # ===== BATTLE LIST METHODS =====
+
+    def _load_battle_row_background(self, path: str) -> Optional[Image.Image]:
+        """Load and crop battle row background image - FIXED to crop from RIGHT side."""
+        full_img = SafeLoader.safe_load_image(path)
+        if not full_img:
+            return None
+        
+        crop_width = 620
+        if full_img.width >= crop_width:
+            # Crop from the RIGHT side, not the left
+            row_bg = ImageLoader.crop(full_img, right=full_img.width - crop_width)
+        else:
+            row_bg = full_img
+        
+        return row_bg.resize((crop_width, 24), Image.Resampling.NEAREST)
+
+    def _draw_battle_row(self, parent, battle: Battle, index: int, row_bg: Optional[Image.Image]):
+        """Draw a single battle row as a clickable item with COMPOSITE unit panels."""
+        row = tk.Frame(parent, bg=BG_COLOR, height=24)
+        row.pack(fill="x", pady=0)
+        
+        row_canvas = tk.Canvas(row, width=620, height=24, highlightthickness=0, bg=BG_COLOR)
+        row_canvas.pack(side="left", anchor="w")
+        
+        # Background
+        if row_bg:
+            photo = ImageTk.PhotoImage(row_bg)
+            self.image_refs.append(photo)
+            row_canvas.create_image(0, 0, anchor="nw", image=photo)
+        
+        # Battle information
+        battle_name = battle.name if len(battle.name) <= 25 else battle.name[:22] + "..."
+        
+        # Main battle info
+        main_text = f"{index + 1}. {battle_name}"
+        row_canvas.create_text(10, 12, text=main_text, anchor="w", font=("Arial", 9, "bold"))
+        
+        # Get country tags and calculate total army sizes - FIXED: Use all units
+        attacker_country_tag = battle.attacker.get('country', '?')
+        defender_country_tag = battle.defender.get('country', '?')
+        
+        attacker_units = battle.attacker.get('units', {})
+        defender_units = battle.defender.get('units', {})
+        
+        # Calculate total army sizes - FIXED: Sum ALL units
+        attacker_army_size = sum(attacker_units.values())
+        defender_army_size = sum(defender_units.values())
+        
+        attacker_losses = battle.attacker.get('losses', 0)
+        defender_losses = battle.defender.get('losses', 0)
+        
+        # Format numbers to be compact (K for thousands)
+        def format_number(num):
+            if num >= 200000:
+                return f"{num/1000000:.1f}M"
+            elif num >= 1000000:
+                return f"{num/1000000:.0f}M"
+            elif num >= 10000:
+                return f"{num/1000:.0f}K"
+            elif num >= 1000:
+                return f"{num/1000:.1f}K"
+            else:
+                return str(num)
+        
+        attacker_size_str = format_number(attacker_army_size)
+        defender_size_str = format_number(defender_army_size)
+        
+        # Determine if this is a naval battle
+        is_naval_battle = UnitTypeClassifier.is_naval_battle_for_panel(battle, self._unit_types)
+        
+        # Position for unit panels
+        panels_start_x = 228
+        panel_spacing = 10
+        
+        # Create and draw attacker unit panel
+        if attacker_country_tag and attacker_country_tag != "?":
+            attacker_panel = self._create_unit_panel(
+                attacker_country_tag, 
+                attacker_size_str,
+                is_attacker=True,
+                is_winner=(battle.result is True),
+                is_naval=is_naval_battle,
+                initial_army=attacker_army_size,
+                casualties=attacker_losses
+            )
+            if attacker_panel:
+                photo_attacker = ImageTk.PhotoImage(attacker_panel)
+                self.image_refs.append(photo_attacker)
+                row_canvas.create_image(panels_start_x, 1, anchor="nw", image=photo_attacker)
+        
+        # UPDATED: Load and display army_icon_2.dds cropped to 24x24
+        army_icon_path = self.state.get_modded_path(os.path.join("gfx", "interface", "army_icon_2.dds"))
+        army_icon = SafeLoader.safe_load_image(army_icon_path)
+        
+        if army_icon:
+            # Crop 24px from the right to make it 24x24
+            if army_icon.width >= 48 and army_icon.height >= 24:
+                cropped_icon = army_icon.crop((0, 0, 24, 24))  # Left 24px of the 48x24 image
+            else:
+                # If image is wrong size, resize to 24x24
+                cropped_icon = army_icon.resize((24, 24), Image.Resampling.LANCZOS)
+            
+            photo_army = ImageTk.PhotoImage(cropped_icon)
+            self.image_refs.append(photo_army)
+            # Position between the panels
+            army_x = panels_start_x + 78 + 12  # Same position as before
+            army_y = 12  # Center vertically
+            row_canvas.create_image(army_x, army_y, anchor="center", image=photo_army)
+        else:
+            # Fallback to "vs" text if icon fails to load
+            row_canvas.create_text(panels_start_x + 78 + 8, 12, text="vs", anchor="center", 
+                                font=("Arial", 8, "bold"), fill="black")
+        
+        # Create and draw defender unit panel
+        defender_panel_x = panels_start_x + 78 + 24  # Account for army icon width
+        if defender_country_tag and defender_country_tag != "?":
+            defender_panel = self._create_unit_panel(
+                defender_country_tag, 
+                defender_size_str,
+                is_attacker=False,
+                is_winner=(battle.result is False),
+                is_naval=is_naval_battle,
+                initial_army=defender_army_size,
+                casualties=defender_losses
+            )
+            if defender_panel:
+                photo_defender = ImageTk.PhotoImage(defender_panel)
+                self.image_refs.append(photo_defender)
+                row_canvas.create_image(defender_panel_x, 1, anchor="nw", image=photo_defender)
+        
+        # Click handler for battle details popup
+        def on_battle_click(event):
+            self._show_battle_popup(battle)
+        
+        row_canvas.bind("<Button-1>", on_battle_click)
+        row.bind("<Button-1>", on_battle_click)
+
+    def _create_unit_panel(self, country_tag: str, army_size: str, 
+                        is_attacker: bool, is_winner: bool, is_naval: bool,
+                        initial_army: int, casualties: int) -> Optional[Image.Image]:
+        """Create a composite unit panel with background, color overlay, flag, and army size text."""
+        # Load Unit_Panel_bg.dds and crop according to battle type
+        panel_bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "Unit_Panel_bg.dds"))
+        panel_bg = SafeLoader.safe_load_image(panel_bg_path)
+        
+        if not panel_bg:
+            return None
+        
+        # Crop Unit_Panel_bg.dds to 78x22
+        # For land battle: start from 3px down and 3px left
+        # For naval battle: start from 3px down and 87px from the left
+        if is_naval:
+            bg_crop_x = 87
+        else:
+            bg_crop_x = 3
+        
+        bg_crop_y = 3
+        bg_crop_width = 78
+        bg_crop_height = 22
+        
+        # Crop the background
+        try:
+            panel_bg_cropped = panel_bg.crop((bg_crop_x, bg_crop_y, bg_crop_x + bg_crop_width, bg_crop_y + bg_crop_height))
+        except Exception as e:
+            return None
+        
+        # Load unit_panel_color.dds and crop according to win/loss
+        panel_color_path = self.state.get_modded_path(os.path.join("gfx", "interface", "unit_panel_color.dds"))
+        panel_color = SafeLoader.safe_load_image(panel_color_path)
+        
+        if panel_color:
+            # Crop unit_panel_color.dds to 76x20
+            # For winning side: crop starts at 0x0
+            # For losing side: crop starts at 76x0
+            if is_winner:
+                color_crop_x = 0
+            else:
+                color_crop_x = 76
+            
+            color_crop_y = 0
+            color_crop_width = 76
+            color_crop_height = 20
+            
+            try:
+                panel_color_cropped = panel_color.crop((color_crop_x, color_crop_y, color_crop_x + color_crop_width, color_crop_y + color_crop_height))
+            except Exception as e:
+                panel_color_cropped = None
+        else:
+            panel_color_cropped = None
+        
+        # Load country flag with the SAME overlay as used in war details
+        flag_overlay_path = self.state.get_modded_path(os.path.join("gfx", "interface", "flag_overlay_new.tga"))
+        flag_overlay = SafeLoader.safe_load_image(flag_overlay_path, size=(FLAG_WIDTH, FLAG_HEIGHT))
+        
+        flag = self._load_country_flag_for_panel(country_tag)
+        if flag:
+            # Resize flag to standard flag size and apply the same overlay as war details
+            flag_resized = flag.resize((FLAG_WIDTH, FLAG_HEIGHT), Image.Resampling.LANCZOS)
+            
+            # Apply the same flag overlay used in war details
+            if flag_overlay:
+                flag_resized = flag_resized.copy()
+                flag_resized.alpha_composite(flag_overlay)
+        else:
+            flag_resized = None
+        
+        # Create composite image
+        composite = Image.new("RGBA", (bg_crop_width, bg_crop_height), (0, 0, 0, 0))
+        
+        # 1. Add background
+        composite.paste(panel_bg_cropped, (0, 0))
+        
+        # 2. Add color overlay with 1x1 pixel offset
+        if panel_color_cropped:
+            composite.alpha_composite(panel_color_cropped, (1, 1))
+        
+        # 3. Add flag with proper overlay - POSITION AT 2px from left as requested
+        if flag_resized:
+            flag_x = 2  # Position flag 2px from left edge
+            flag_y = (bg_crop_height - FLAG_HEIGHT) // 2  # Keep vertical centering
+            composite.alpha_composite(flag_resized, (flag_x, flag_y))
+        
+        # 4. ADD ARMY SIZE TEXT INSIDE THE PANEL, CENTERED AT THE SAME POSITION
+        draw = ImageDraw.Draw(composite)
+        
+        # Use a small font that fits in the panel
+        try:
+            # Try to use a small system font
+            font = ImageFont.truetype("arial.ttf", 10)
+        except:
+            try:
+                font = ImageFont.truetype("Arial", 10)
+            except:
+                font = ImageFont.load_default()
+
+        # Text color - white for better contrast
+        text_color = (255, 255, 255)
+
+        # Calculate text metrics for proper centering
+        try:
+            # Get the bounding box of the text
+            bbox = font.getbbox(army_size)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+        except:
+            # Fallback if getbbox is not available
+            text_width = len(army_size) * 5  # Rough estimate
+            text_height = 8
+
+        # Keep the same horizontal position (to the right of the flag)
+        text_x = 2 + FLAG_WIDTH + 19  # Same as before: 2px left + 24px flag + 4px spacing
+
+        # Center the text VERTICALLY at this position
+        text_y = bg_crop_height // 2 - 1  # Middle of the panel
+
+        # Draw army size text with MIDDLE-CENTER anchor
+        draw.text((text_x, text_y), army_size, font=font, fill=text_color, anchor="mm")  # "mm" = middle, middle
+        
+        # 5. ADD CASUALTY BAR VISUALIZATION
+        # Calculate survivor percentage using the passed parameters
+        if initial_army > 0:
+            survivor_percentage = max(0, min(1, (initial_army - casualties) / initial_army))
+        else:
+            # If initial army is 0, show empty bar (0% survivors)
+            survivor_percentage = 0
+
+        # Load and prepare the organization images
+        org_bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "unitpanel_organisation_2.dds"))
+        org_fg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "unitpanel_organisation_1.dds"))
+
+        org_bg = SafeLoader.safe_load_image(org_bg_path)
+        org_fg = SafeLoader.safe_load_image(org_fg_path)
+
+        if org_bg and org_fg:
+            # Process background (red bar) - rotate 90° CW and flip vertically
+            org_bg_processed = org_bg.rotate(-90, expand=True)  # -90 for clockwise
+            org_bg_processed = org_bg_processed.transpose(Image.FLIP_TOP_BOTTOM)  # Flip vertically
+            org_bg_processed = org_bg_processed.resize((6, 12), Image.Resampling.LANCZOS)  # Now 6x12
+            
+            # Process foreground (green bar) - rotate 90° CW and flip vertically
+            org_fg_processed = org_fg.rotate(-90, expand=True)  # -90 for clockwise
+            org_fg_processed = org_fg_processed.transpose(Image.FLIP_TOP_BOTTOM)  # Flip vertically
+            org_fg_processed = org_fg_processed.resize((6, 12), Image.Resampling.LANCZOS)  # Now 6x12
+            
+            # Position for casualty bar (to the right of the text)
+            bar_x = text_x + 23  # Your adjusted spacing
+            bar_y = (bg_crop_height - 12) // 2  # Center vertically
+            
+            # Draw background (red) - ALWAYS draw the background, regardless of initial army
+            composite.alpha_composite(org_bg_processed, (bar_x, bar_y))
+            
+            # Draw foreground (green) - height based on survivor percentage
+            if survivor_percentage > 0:
+                # Calculate how many pixels to show (from bottom up)
+                fg_height = int(12 * survivor_percentage)
+                if fg_height > 0:
+                    # Crop the green bar to show only the bottom portion
+                    fg_cropped = org_fg_processed.crop((0, 12 - fg_height, 6, 12))
+                    composite.alpha_composite(fg_cropped, (bar_x, bar_y + (12 - fg_height)))
+        
+        return composite
+
+    def _load_country_flag_for_panel(self, tag: str) -> Optional[Image.Image]:
+        """Load flag image for display in unit panels (separate from war header method)."""
+        if not tag or tag == "---" or tag == "?":
+            return None
+        
+        cache_key = f"flag_{tag}_panel"
+        cached_flag = self.state.image_cache.get(cache_key)
+        if cached_flag:
+            return cached_flag
+        
+        gov_name = self.state.country_governments.get(tag)
+        if gov_name:
+            flag_type = self.state.gov_to_flagtype.get(gov_name)
+            if flag_type:
+                variant_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}_{flag_type}.tga"))
+                flag = SafeLoader.safe_load_image(variant_path)
+                if flag:
+                    self.state.image_cache.set(cache_key, flag)
+                    return flag
+        
+        base_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}.tga"))
+        flag = SafeLoader.safe_load_image(base_path)
+        if flag:
+            self.state.image_cache.set(cache_key, flag)
+        return flag
+
+# ============================================================================
+# UPDATED BATTLE POPUP WITH DYNAMIC LEADERS
+# ============================================================================
+
+    def _show_battle_popup(self, battle: Battle):
+        """Show enhanced battle popup with dynamic leader graphics."""
+        # Load unit types first to handle modded units
+        if not hasattr(self, '_unit_types'):
+            self._unit_types = UnitTypeClassifier.load_unit_types(self.state)
+        
+        # Determine if this is a naval battle
+        is_naval_battle = UnitTypeClassifier.is_naval_battle_for_panel(battle, self._unit_types)
+        unit_analysis = UnitTypeClassifier.analyze_battle_units(battle, self._unit_types)
+        
+        popup = tk.Toplevel(self.root)
+        popup.title(f"Battle: {battle.name}")
+        popup.geometry("544x436")
+        popup.resizable(False, False)
+        popup.transient(self.root)
+        popup.grab_set()
+        
+        # Center the popup
+        popup.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - popup.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - popup.winfo_height()) // 2
+        popup.geometry(f"+{x}+{y}")
+        
+        canvas = tk.Canvas(popup, width=544, height=436, highlightthickness=0)
+        canvas.pack()
+        
+        images_refs = []
+        
+        # Convert battle data to the format expected by the battle GUI
+        battle_info = self._convert_battle_to_info(battle)
+        
+        # Background - FIXED: Use proper naval background
+        if is_naval_battle:
+            bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "combat_end_bg.dds"))
+        else:
+            bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "combat_end_bg.dds"))
+        
+        bg_img = SafeLoader.safe_load_image(bg_path, (544, 436))
+        if bg_img:
+            bg_photo = ImageTk.PhotoImage(bg_img)
+            canvas.create_image(0, 0, anchor=tk.NW, image=bg_photo)
+            images_refs.append(bg_photo)
+        
+        # Terrain/background image based on battle type - UPDATED: Flip based on outcome
+        if is_naval_battle:
+            terrain_rel_path = os.path.join("gfx", "interface", "combat_end_naval_won.dds")
+        else:
+            terrain_rel_path = os.path.join("gfx", "interface", "combat_end_land_won.dds")
+        
+        terrain_path = self.state.get_modded_path(terrain_rel_path)
+        terrain_img = SafeLoader.safe_load_image(terrain_path)
+        if terrain_img:
+            terrain_img = ImageLoader.crop(terrain_img, left=2, top=2, right=2, bottom=2)
+            terrain_img = terrain_img.resize((507, 72), Image.Resampling.LANCZOS)
+            
+            # FLIP HORIZONTALLY:
+            # - Naval battles: flip if attacker won
+            # - Land battles: flip if defender won
+            if (is_naval_battle and battle.result is True) or (not is_naval_battle and battle.result is False):
+                terrain_img = terrain_img.transpose(Image.FLIP_LEFT_RIGHT)
+            
+            terrain_photo = ImageTk.PhotoImage(terrain_img)
+            canvas.create_image(18, 46, anchor=tk.NW, image=terrain_photo)
+            images_refs.append(terrain_photo)
+        
+        # Flags with overlay
+        overlay_path = self.state.get_modded_path(os.path.join("gfx", "interface", "shield_frame.dds"))
+        
+        # Get country tags for flags
+        attacker_country = battle.attacker.get('country', 'UNK')
+        defender_country = battle.defender.get('country', 'UNK')
+        
+        # Load flags
+        left_flag_img = self._load_battle_flag(attacker_country, overlay_path, -90)
+        right_flag_img = self._load_battle_flag(defender_country, overlay_path, -90)
+        
+        if left_flag_img:
+            left_flag_photo = ImageTk.PhotoImage(left_flag_img)
+            canvas.create_image(46, 82, anchor=tk.CENTER, image=left_flag_photo)
+            images_refs.append(left_flag_photo)
+        
+        if right_flag_img:
+            right_flag_photo = ImageTk.PhotoImage(right_flag_img)
+            canvas.create_image(496, 82, anchor=tk.CENTER, image=right_flag_photo)
+            images_refs.append(right_flag_photo)
+        
+        # DYNAMIC LEADERS - based on culture and battle type
+        leader_size = (32, 40)
+        
+        # Get leader names
+        attacker_leader_name = battle.attacker.get('leader', 'Unknown Commander')
+        defender_leader_name = battle.defender.get('leader', 'Unknown Commander')
+        
+        # Check if we need to use no_leader.dds for attacker
+        if attacker_leader_name in ["No Commander", "Unknown Commander", "Unknown"]:
+            attacker_leader_path = self.state.get_modded_path(os.path.join("gfx", "interface", "leaders", "no_leader.dds"))
+        else:
+            attacker_leader_path = CultureLeaderMapper.get_leader_graphics(
+                self.state, attacker_country, is_naval_battle
+            )
+            if not attacker_leader_path:
+                # Fallback to default
+                if is_naval_battle:
+                    attacker_leader_path = self.state.get_modded_path(os.path.join("gfx", "interface", "leaders", "european_admiral_24.dds"))
+                else:
+                    attacker_leader_path = self.state.get_modded_path(os.path.join("gfx", "interface", "leaders", "european_general_24.dds"))
+        
+        # Check if we need to use no_leader.dds for defender
+        if defender_leader_name in ["No Commander", "Unknown Commander", "Unknown"]:
+            defender_leader_path = self.state.get_modded_path(os.path.join("gfx", "interface", "leaders", "no_leader.dds"))
+        else:
+            defender_leader_path = CultureLeaderMapper.get_leader_graphics(
+                self.state, defender_country, is_naval_battle
+            )
+            if not defender_leader_path:
+                # Fallback to default
+                if is_naval_battle:
+                    defender_leader_path = self.state.get_modded_path(os.path.join("gfx", "interface", "leaders", "european_admiral_2.dds"))
+                else:
+                    defender_leader_path = self.state.get_modded_path(os.path.join("gfx", "interface", "leaders", "european_general_2.dds"))
+        
+        attacker_leader = SafeLoader.safe_load_image(attacker_leader_path, leader_size)
+        defender_leader = SafeLoader.safe_load_image(defender_leader_path, leader_size)
+        
+        if attacker_leader:
+            attacker_leader_photo = ImageTk.PhotoImage(attacker_leader)
+            canvas.create_image(46 - 11 - leader_size[0] // 2, 124, anchor=tk.NW, image=attacker_leader_photo)
+            images_refs.append(attacker_leader_photo)
+        
+        if defender_leader:
+            defender_leader_photo = ImageTk.PhotoImage(defender_leader)
+            canvas.create_image(496 + 12 - leader_size[0] // 2, 124, anchor=tk.NW, image=defender_leader_photo)
+            images_refs.append(defender_leader_photo)
+        
+        # Fonts
+        font_path = DEFAULT_FONT_PATH
+        kerning_value = -1
+        
+        # Leader names
+        create_label(canvas, attacker_leader_name, 15, (55, 142), tk.NW,
+                    font_path, kerning=kerning_value, images=images_refs)
+        create_label(canvas, defender_leader_name, 15, (485, 142), tk.NE,
+                    font_path, kerning=kerning_value, images=images_refs)
+        
+        # Battle title
+        title_img = render_text_image(f"Battle of {battle.name}", font_path, 18, (255, 255, 255, 255), kerning=kerning_value)
+        title_photo = ImageTk.PhotoImage(title_img)
+        canvas.create_image(272 - title_img.width // 2, 28 - title_img.height // 2, anchor=tk.NW, image=title_photo)
+        images_refs.append(title_photo)
+        
+        # Result text
+        result_text = "Attacker Won" if battle.result is True else "Defender Won" if battle.result is False else "Indecisive"
+        result_color = (0, 159, 0, 255)  # Green for victory
+        result_img = render_text_image(result_text, font_path, 20, result_color, kerning=kerning_value)
+        result_photo = ImageTk.PhotoImage(result_img)
+        canvas.create_image(272 - result_img.width // 2, 343 - result_img.height // 2, anchor=tk.NW, image=result_photo)
+        images_refs.append(result_photo)
+        
+        # Unit Table - DIFFERENT FOR NAVAL BATTLES
+        if is_naval_battle:
+            # NAVAL BATTLE: Show ship types
+            self._draw_naval_unit_table(canvas, battle, unit_analysis, images_refs)
+        else:
+            # LAND BATTLE: Show land unit types
+            self._draw_land_unit_table(canvas, battle, unit_analysis, images_refs)
+        
+        # Store image references to prevent garbage collection
+        popup._images = images_refs
+
+    def _draw_naval_unit_table(self, canvas, battle: Battle, unit_analysis: Dict, images_refs: list):
+        """Draw naval unit table - Show initial ship types, but only totals for sunk/survivors."""
+        font_path = DEFAULT_FONT_PATH
+        font_path_arial = "arial.ttf"  # Added Arial font for headers
+        
+        unit_strip_path = self.state.get_modded_path(os.path.join("gfx", "interface", "unit_strip.dds"))
+        unit_strip = SafeLoader.safe_load_image(unit_strip_path)
+        
+        if unit_strip:
+            # Naval unit icon mapping
+            icon_map = {
+                'big_ship': 3,       # Big ships (battleships, dreadnoughts)
+                'light_ship': 4,     # Light ships (cruisers, frigates)
+                'transport': 5,      # Transports
+            }
+            
+            # Naval unit order
+            naval_unit_order = ['big_ship', 'light_ship', 'transport']
+            
+            base_x = 21
+            icon_x = base_x
+            atk_xs = [icon_x + 106, icon_x + 173, icon_x + 240]
+            def_xs = [base_x + 394, base_x + 328, base_x + 262]
+            start_y = 185
+            row_spacing = 31
+            
+            # Get actual losses from battle data
+            attacker_total_losses = battle.attacker.get('losses', 0)
+            defender_total_losses = battle.defender.get('losses', 0)
+            
+            # Calculate total ships and survivors
+            attacker_total_ships = sum(unit_analysis['attacker'].values())
+            defender_total_ships = sum(unit_analysis['defender'].values())
+            
+            attacker_survivors = max(0, attacker_total_ships - attacker_total_losses)
+            defender_survivors = max(0, defender_total_ships - defender_total_losses)
+            
+            # FIXED: Column headers with consistent positioning
+            column_headers = ["Initial", "Casualties", "Survivors"]
+            
+            # Attacker column headers (right-aligned)
+            for i, (label, x) in enumerate(zip(column_headers, atk_xs)):
+                if label:
+                    img = render_text_image(label, font_path_arial, 11, (0, 0, 0, 255))
+                    photo = ImageTk.PhotoImage(img)
+                    # Use CENTER anchor for consistent positioning regardless of text width
+                    canvas.create_image(x - 29, start_y - 7, anchor=tk.CENTER, image=photo)
+                    images_refs.append(photo)
+            
+            # Defender column headers (left-aligned)  
+            for i, (label, x) in enumerate(zip(column_headers, def_xs)):
+                if label:
+                    img = render_text_image(label, font_path_arial, 11, (0, 0, 0, 255))
+                    photo = ImageTk.PhotoImage(img)
+                    # Use CENTER anchor for consistent positioning
+                    canvas.create_image(x + 28, start_y - 7, anchor=tk.CENTER, image=photo)
+                    images_refs.append(photo)
+            
+            # Ship type rows - ONLY SHOW INITIAL COUNTS
+            for i, ship_type in enumerate(naval_unit_order):
+                y = start_y + i * row_spacing
+                
+                # Get categorized ship counts from the analyzer
+                atk_initial = unit_analysis['attacker'].get(ship_type, 0)
+                def_initial = unit_analysis['defender'].get(ship_type, 0)
+                
+                # Draw ship icons
+                if ship_type in icon_map:
+                    icon = get_unit_icon(unit_strip, icon_map[ship_type])
+                    icon_photo = ImageTk.PhotoImage(icon)
+                    # Attacker icon (left)
+                    canvas.create_image(icon_x, y, anchor=tk.NW, image=icon_photo)
+                    # Defender icon (right) 
+                    canvas.create_image(base_x + 464, y, anchor=tk.NW, image=icon_photo)
+                    images_refs.append(icon_photo)
+                
+                # Attacker stats - ONLY INITIAL (always show first column, skip others)
+                atk_vals = [atk_initial, "", ""]
+                img = render_text_image(str(atk_vals[0]), font_path, 13, (0, 0, 0, 255))
+                photo = ImageTk.PhotoImage(img)
+                canvas.create_image(atk_xs[0], y + 25, anchor=tk.E, image=photo)
+                images_refs.append(photo)
+
+                # Defender stats - ONLY INITIAL (always show first column, skip others)
+                def_vals = [def_initial, "", ""]
+                img = render_text_image(str(def_vals[0]), font_path, 13, (0, 0, 0, 255))
+                photo = ImageTk.PhotoImage(img)
+                canvas.create_image(def_xs[0], y + 25, anchor=tk.W, image=photo)
+                images_refs.append(photo)
+            
+            # Total row - SHOW ALL TOTALS (Initial, Sunk, Survivors)
+            total_y = start_y + len(naval_unit_order) * row_spacing + 8
+            
+            # Attacker totals
+            atk_total_vals = [
+                attacker_total_ships,
+                f"-{attacker_total_losses}",
+                attacker_survivors
+            ]
+            for val, x in zip(atk_total_vals, atk_xs):
+                img = render_text_image(str(val), font_path, 15, (0, 0, 0, 255))
+                photo = ImageTk.PhotoImage(img)
+                canvas.create_image(x, total_y + 15, anchor=tk.E, image=photo)
+                images_refs.append(photo)
+            
+            # Defender totals
+            def_total_vals = [
+                defender_total_ships,
+                f"-{defender_total_losses}",
+                defender_survivors
+            ]
+            for val, x in zip(def_total_vals, def_xs):
+                img = render_text_image(str(val), font_path, 15, (0, 0, 0, 255))
+                photo = ImageTk.PhotoImage(img)
+                canvas.create_image(x, total_y + 15, anchor=tk.W, image=photo)
+                images_refs.append(photo)
+
+    def _draw_land_unit_table(self, canvas, battle: Battle, unit_analysis: Dict, images_refs: list):
+        """Draw land unit table - Show initial unit types, but only totals for casualties/survivors."""
+        font_path = DEFAULT_FONT_PATH
+        font_path_arial = "arial.ttf"  # Fixed typo: was "arial.tff"
+        
+        unit_strip_path = self.state.get_modded_path(os.path.join("gfx", "interface", "unit_strip.dds"))
+        unit_strip = SafeLoader.safe_load_image(unit_strip_path)
+        
+        if unit_strip:
+            # Land unit icon mapping - CAVALRY FIRST
+            icon_map = {
+                'cavalry': 1,       # Cavalry icon - FIRST ROW
+                'infantry': 0,      # Infantry icon - SECOND ROW
+                'support_special': 2,  # Artillery icon for support/special - THIRD ROW
+            }
+            
+            # REORDERED: Cavalry first, then infantry, then support/special
+            land_unit_order = ['cavalry', 'infantry', 'support_special']
+            
+            base_x = 21
+            icon_x = base_x
+            atk_xs = [icon_x + 106, icon_x + 173, icon_x + 240]
+            def_xs = [base_x + 394, base_x + 328, base_x + 262]
+            start_y = 185
+            row_spacing = 31
+            
+            # Get actual losses from battle data
+            attacker_total_losses = battle.attacker.get('losses', 0)
+            defender_total_losses = battle.defender.get('losses', 0)
+            
+            # Calculate total army and survivors
+            attacker_total_army = sum(unit_analysis['attacker'].values())
+            defender_total_army = sum(unit_analysis['defender'].values())
+            
+            attacker_survivors = max(0, attacker_total_army - attacker_total_losses)
+            defender_survivors = max(0, defender_total_army - defender_total_losses)
+            
+            # FIXED: Column headers with consistent positioning
+            column_headers = ["Initial", "Casualties", "Survivors"]
+            
+            # Attacker column headers (right-aligned)
+            for i, (label, x) in enumerate(zip(column_headers, atk_xs)):
+                if label:
+                    img = render_text_image(label, font_path_arial, 11, (0, 0, 0, 255))
+                    photo = ImageTk.PhotoImage(img)
+                    # Use CENTER anchor for consistent positioning regardless of text width
+                    canvas.create_image(x - 29, start_y - 7, anchor=tk.CENTER, image=photo)
+                    images_refs.append(photo)
+            
+            # Defender column headers (left-aligned)  
+            for i, (label, x) in enumerate(zip(column_headers, def_xs)):
+                if label:
+                    img = render_text_image(label, font_path_arial, 11, (0, 0, 0, 255))
+                    photo = ImageTk.PhotoImage(img)
+                    # Use CENTER anchor for consistent positioning
+                    canvas.create_image(x + 28, start_y - 7, anchor=tk.CENTER, image=photo)
+                    images_refs.append(photo)
+            
+            # Rest of your existing code for unit rows and totals...
+            # Land unit rows - ONLY SHOW INITIAL COUNTS
+            for i, unit_type in enumerate(land_unit_order):
+                y = start_y + i * row_spacing
+                
+                # Get categorized unit counts from the analyzer
+                atk_initial = unit_analysis['attacker'].get(unit_type, 0)
+                def_initial = unit_analysis['defender'].get(unit_type, 0)
+                
+                # Draw unit icons
+                if unit_type in icon_map:
+                    icon = get_unit_icon(unit_strip, icon_map[unit_type])
+                    icon_photo = ImageTk.PhotoImage(icon)
+                    # Attacker icon (left)
+                    canvas.create_image(icon_x, y, anchor=tk.NW, image=icon_photo)
+                    # Defender icon (right) 
+                    canvas.create_image(base_x + 464, y, anchor=tk.NW, image=icon_photo)
+                    images_refs.append(icon_photo)
+                
+                # Attacker stats - ONLY INITIAL
+                atk_vals = [atk_initial, "", ""]
+                img = render_text_image(str(atk_vals[0]), font_path, 13, (0, 0, 0, 255))
+                photo = ImageTk.PhotoImage(img)
+                canvas.create_image(atk_xs[0], y + 25, anchor=tk.E, image=photo)
+                images_refs.append(photo)
+
+                # Defender stats - ONLY INITIAL
+                def_vals = [def_initial, "", ""]
+                img = render_text_image(str(def_vals[0]), font_path, 13, (0, 0, 0, 255))
+                photo = ImageTk.PhotoImage(img)
+                canvas.create_image(def_xs[0], y + 25, anchor=tk.W, image=photo)
+                images_refs.append(photo)
+            
+            # Total row - SHOW ALL TOTALS
+            total_y = start_y + len(land_unit_order) * row_spacing + 8
+            
+            # Attacker totals
+            atk_total_vals = [
+                attacker_total_army,
+                f"-{attacker_total_losses}",
+                attacker_survivors
+            ]
+            for val, x in zip(atk_total_vals, atk_xs):
+                img = render_text_image(str(val), font_path, 15, (0, 0, 0, 255))
+                photo = ImageTk.PhotoImage(img)
+                canvas.create_image(x, total_y + 15, anchor=tk.E, image=photo)
+                images_refs.append(photo)
+            
+            # Defender totals
+            def_total_vals = [
+                defender_total_army,
+                f"-{defender_total_losses}",
+                defender_survivors
+            ]
+            for val, x in zip(def_total_vals, def_xs):
+                img = render_text_image(str(val), font_path, 15, (0, 0, 0, 255))
+                photo = ImageTk.PhotoImage(img)
+                canvas.create_image(x, total_y + 15, anchor=tk.W, image=photo)
+                images_refs.append(photo)
+
+    def _load_battle_flag(self, country_tag: str, overlay_path: str, rotate_degrees: int = 0) -> Optional[Image.Image]:
+        """Load a HIGH-RESOLUTION flag with overlay for battle popup."""
+        target_size = (66, 51)
+        
+        # Load the flag at HIGH resolution directly from file
+        flag = self._load_high_res_flag(country_tag, target_size)
+        if not flag:
+            return None
+        
+        # Load overlay
+        overlay = SafeLoader.safe_load_image(overlay_path, target_size)
+        if not overlay:
+            return flag
+        
+        # Apply rotation if needed
+        if rotate_degrees:
+            flag = flag.rotate(rotate_degrees, expand=True)
+            overlay = overlay.rotate(rotate_degrees, expand=True)
+        
+        # Composite overlay onto flag
+        flag = flag.copy()
+        flag.alpha_composite(overlay)
+        
+        return flag
+
+    def _load_high_res_flag(self, tag: str, target_size: Tuple[int, int] = (66, 51)) -> Optional[Image.Image]:
+        """Load flag at original resolution and resize once for maximum quality."""
+        if not tag or tag == "---":
+            return None
+        
+        cache_key = f"flag_hr_{tag}_{target_size[0]}x{target_size[1]}"
+        cached_flag = self.state.image_cache.get(cache_key)
+        if cached_flag:
+            return cached_flag
+        
+        # Load flag WITHOUT any initial resize
+        gov_name = self.state.country_governments.get(tag)
+        if gov_name:
+            flag_type = self.state.gov_to_flagtype.get(gov_name)
+            if flag_type:
+                variant_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}_{flag_type}.tga"))
+                flag = SafeLoader.safe_load_image(variant_path)
+                if flag:
+                    # Single high-quality resize to target
+                    flag = flag.resize(target_size, Image.Resampling.LANCZOS)
+                    self.state.image_cache.set(cache_key, flag)
+                    return flag
+        
+        base_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}.tga"))
+        flag = SafeLoader.safe_load_image(base_path)
+        if flag:
+            # Single high-quality resize to target
+            flag = flag.resize(target_size, Image.Resampling.LANCZOS)
+            self.state.image_cache.set(cache_key, flag)
+        
+        return flag
+    
+    def _convert_battle_to_info(self, battle: Battle) -> Dict:
+        """Convert Battle dataclass to the format expected by battle GUI."""
+        return {
+            "name": battle.name,
+            "result": "Attacker Victory" if battle.result is True else "Defender Victory" if battle.result is False else "Indecisive",
+            "attacker_flag": f"{battle.attacker.get('country', 'UNK')}.tga",
+            "defender_flag": f"{battle.defender.get('country', 'UNK')}.tga",
+            "attacker_leader": "european_general_24.dds",
+            "defender_leader": "european_general_2.dds",
+            "attacker_leader_name": battle.attacker.get('leader', 'Unknown Commander'),
+            "defender_leader_name": battle.defender.get('leader', 'Unknown Commander'),
+            "terrain_image": "terrain_plains.tga",  # Default for now
+            "attacker_units": battle.attacker.get('units', {}),
+            "defender_units": battle.defender.get('units', {}),
+        }
+
+    # ===== WAR GOAL TRANSLATION METHODS =====
+
+    def _translate_war_goal(self, war_goal: WarGoal, war: War) -> str:
+        """Translate war goal using the stored WarGoal object."""
+        # Make sure we have localization data loaded
+        if not hasattr(self.state, 'localization_names') or not self.state.localization_names:
+            self.state.localization_names = LocalizationParser.parse_localization_files(self.state)
+        
+        # Translate CB name
+        translated_cb = None
+        cb_name = war_goal.casus_belli
+        if cb_name:
+            translated_cb = self.state.localization_names.get(cb_name)
+            if not translated_cb:
+                # Try common variations
+                variations = [
+                    cb_name,
+                    cb_name.lower(),
+                    cb_name.upper(),
+                    f"_{cb_name}",
+                    f"_{cb_name.lower()}",
+                ]
+                for variation in variations:
+                    if variation in self.state.localization_names:
+                        translated_cb = self.state.localization_names[variation]
+                        break
+            if not translated_cb:
+                translated_cb = cb_name
+        
+        # Use the war goal's actor and receiver (which now have war leader fallback)
+        goal_actor = war_goal.actor
+        goal_receiver = war_goal.receiver
+        
+        # Get country names - these should now always be valid
+        actor_gov = self.state.country_governments.get(goal_actor, "Unknown")
+        receiver_gov = self.state.country_governments.get(goal_receiver, "Unknown")
+        
+        actor_name = LocalizationParser.get_country_name(self.state, goal_actor, actor_gov)
+        receiver_name = LocalizationParser.get_country_name(self.state, goal_receiver, receiver_gov)
+        
+        # Translate state name if available
+        state_name = None
+        if war_goal.state_province_id:
+            state_name = self._get_state_name(war_goal.state_province_id)
+        
+        # Construct the translated goal
+        cb_display = (translated_cb or cb_name).lower()
+        
+        if war_goal.state_province_id and state_name:
+            translated_goal = f"{actor_name} {cb_display} of {state_name} against {receiver_name}"
+        elif war_goal.state_province_id:
+            translated_goal = f"{actor_name} {cb_display} of State {war_goal.state_province_id} against {receiver_name}"
+        else:
+            translated_goal = f"{actor_name} {cb_display} against {receiver_name}"
+        
+        return translated_goal
+
+    def _get_state_name(self, state_id: str) -> Optional[str]:
+        """Get the name of a state by its ID from localization files."""
+        if not hasattr(self.state, 'localization_names') or not self.state.localization_names:
+            return None
+        
+        # Victoria 2 province names are stored as PROV{id} in localization
+        target_key = f"PROV{state_id}"
+        
+        # Check exact matches first
+        for key in [target_key, target_key.upper(), target_key.lower()]:
+            if key in self.state.localization_names:
+                return self.state.localization_names[key]
+        
+        # Look for any key that contains the province ID (case insensitive)
+        for key, value in self.state.localization_names.items():
+            if state_id in key and 'PROV' in key.upper():
+                return value
+
+        return None
+
+    def _draw_war_score_visualization(self, war: War, x: int, y: int):
+        """Draw a visual representation of the war score percentage from -100% to 100%."""
+        # Calculate war statistics
+        stats = WarAnalyzer.calculate_war_statistics(war)
+        war_score = stats.war_score_estimate  # This is already -100 to +100
+        
+        # FIX: No conversion needed - it's already in -100 to +100 range
+        war_score_normalized = war_score  # Direct use, no conversion
+        
+        # UPDATED: Overlay is 224x24 (not 244x24)
+        overlay_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_progress_overlay.dds"))
+        overlay = SafeLoader.safe_load_image(overlay_path, size=(224, 24))
+        
+        # Load progress bars (both 216x16)
+        progress1_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_progress1.dds"))
+        progress2_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_progress2.dds"))
+        
+        progress1 = SafeLoader.safe_load_image(progress1_path, size=(216, 16))
+        progress2 = SafeLoader.safe_load_image(progress2_path, size=(216, 16))
+        
+        if overlay and progress1 and progress2:
+            # UPDATED: Create composite image with 224 width
+            composite = Image.new("RGBA", (224, 24), (0, 0, 0, 0))
+            
+            # Position progress bars
+            progress_x = 4
+            progress_y = 4
+            
+            # ALWAYS draw defender progress bar (progress2) at full width
+            composite.paste(progress2, (progress_x, progress_y))
+            
+            # Calculate how much of progress1 (attacker) to show based on normalized war score
+            crop_amount = int(108 - (war_score_normalized * 1.08))
+            crop_amount = max(0, min(216, crop_amount))
+            
+            if crop_amount < 216:
+                progress1_cropped = progress1.crop((0, 0, 216 - crop_amount, 16))
+                composite.paste(progress1_cropped, (progress_x, progress_y))
+            
+            # Add the overlay on top
+            composite.alpha_composite(overlay)
+            
+            # Add percentage text in the middle
+            draw = ImageDraw.Draw(composite)
+            
+            # UPDATED: Show whole numbers without decimals
+            if stats.total_battles == 0:
+                percentage_text = "0%"
+            elif war_score_normalized > 0:
+                percentage_text = f"{int(war_score_normalized)}%"  # Changed to int()
+            else:
+                percentage_text = f"{int(war_score_normalized)}%"   # Changed to int()
+            
+            try:
+                if self.font_manager.font_14:
+                    font = self.font_manager.font_14
+                else:
+                    font = ImageFont.truetype(DEFAULT_FONT_PATH, 14)
+            except:
+                font = ImageFont.load_default()
+            
+            # UPDATED: Center text in 224px width
+            bbox = font.getbbox(percentage_text)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            text_x = (224 - text_width) // 2
+            text_y = 5
+            
+            draw.text((text_x, text_y), percentage_text, font=font, fill=(0, 0, 0, 255))
+            
+            photo = ImageTk.PhotoImage(composite)
+            self.image_refs.append(photo)
+            
+            # Position 30 pixels below war title, centered
+            viz_x = x + 311
+            viz_y = y - 22 + 40
+            
+            self.canvas.create_image(viz_x, viz_y, anchor=tk.N, image=photo)
+            self._tab3_widgets.append(photo)
+
+    def _draw_war_details_tab(self):
+        """Draw the war details tab with compact layout."""
+        # Clean up any previous tab3 widgets
+        if hasattr(self, "_tab3_widgets"):
+            for wid in self._tab3_widgets:
+                try:
+                    self.canvas.delete(wid)
+                except Exception:
+                    pass
+            self._tab3_widgets.clear()
+        else:
+            self._tab3_widgets = []
+
+        detail_x, detail_y = 30, 80
+
+        # Guard against invalid selection
+        if (self.state.selected_war_index is None or 
+            self.state.selected_war_index >= len(self.state.filtered_wars)):
+            label = tk.Label(
+                self.root,
+                text="No war selected. Select one in 'Show wars' tab.",
+                bg=BG_COLOR,
+                font=("Arial", 11)
+            )
+            wid = self.canvas.create_window(detail_x, detail_y, anchor=tk.NW, window=label)
+            self._tab3_widgets.append(wid)
+            return
+
+        war = self.state.filtered_wars[self.state.selected_war_index]
+        
+        # PRE-CACHE ALL TOOLTIP TEXTS FOR THIS WAR
+        self._cache_flag_tooltips(war)
+        
+        # Add crisis background with correct size 638x249
+        crisis_bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_crises_bg.dds"))
+        crisis_bg = SafeLoader.safe_load_image(crisis_bg_path, size=(638, 249))
+        
+        if crisis_bg:
+            photo_bg = ImageTk.PhotoImage(crisis_bg)
+            self.image_refs.append(photo_bg)
+            bg_id = self.canvas.create_image(detail_x - 6, detail_y - 28, anchor=tk.NW, image=photo_bg)
+            self._tab3_widgets.append(bg_id)
+        
+        # War header with flags
+        self._draw_war_header_simple(war, detail_x, detail_y)
+        
+        # ===== STANDALONE DATE DISPLAY =====
+        # Format dates for display
+        start_date_str = war.start_date if war.start_date else "Unknown"
+        end_date_str = war.end_date if war.end_date else "Ongoing"
+        date_info = f"Dates: {start_date_str} to {end_date_str}"
+        
+        # Create date using Arial font with black text on transparent background
+        date_strip = Image.new("RGBA", (205, 17), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(date_strip)
+
+        # Use Arial font instead of custom font
+        try:
+            arial_font = ImageFont.truetype("arialbd.ttf", 12)
+        except:
+            try:
+                arial_font = ImageFont.truetype("Arial Bold", 12)
+            except:
+                arial_font = ImageFont.load_default()
+
+        bbox = arial_font.getbbox(date_info)
+        text_width = bbox[2] - bbox[0]
+        text_x = max(0, (205 - text_width) // 2)
+        text_y = 1
+
+        # Draw black text with Arial font
+        draw.text((text_x, text_y), date_info, font=arial_font, fill=(0, 0, 0, 255))
+
+        photo = ImageTk.PhotoImage(date_strip)
+        self.image_refs.append(photo)
+        date_y_position = detail_y + 50
+        date_id = self.canvas.create_image(detail_x + 312, date_y_position, anchor=tk.N, image=photo)
+        self._tab3_widgets.append(date_id)
+
+        # ===== MILITARY STATISTICS GRAPHICS =====
+        stats_y_position = detail_y + 86  # Position below the date
+
+        # Calculate military statistics
+        land_stats = self._calculate_land_statistics(war)
+        naval_stats = self._calculate_naval_statistics(war)
+
+        # Load icons
+        army_icon_path = self.state.get_modded_path(os.path.join("gfx", "interface", "topbar_army.dds"))
+        navy_icon_path = self.state.get_modded_path(os.path.join("gfx", "interface", "topbar_navy.dds"))
+
+        army_icon = SafeLoader.safe_load_image(army_icon_path, size=(32, 32))
+        navy_icon = SafeLoader.safe_load_image(navy_icon_path, size=(32, 32))
+
+        # Land battles summary
+        land_battles_count = len(land_stats['land_battles'])
+        attacker_land_wins_count = land_stats['attacker_land_wins']
+        defender_land_wins_count = land_stats['defender_land_wins']
+
+        # Land battles icon
+        if army_icon:
+            photo_army_icon = ImageTk.PhotoImage(army_icon)
+            self.image_refs.append(photo_army_icon)
+            army_icon_id = self.canvas.create_image(detail_x + 215, stats_y_position + 45, anchor=tk.NW, image=photo_army_icon)
+            self._tab3_widgets.append(army_icon_id)
+
+        # FIXED: Use canvas text for true transparency
+        # Column positions
+        label_x = detail_x + 255      # Labels start here
+        number_x = detail_x + 405     # Numbers aligned here
+        
+        # Land battles row
+        self.canvas.create_text(label_x, stats_y_position + 39, text="Land Battles:", 
+                            anchor=tk.NW, font=("Arial", 8), fill="black")
+        self.canvas.create_text(number_x, stats_y_position + 39, text=str(land_battles_count), 
+                            anchor=tk.NE, font=("Arial", 8), fill="black")
+
+        # Attacker wins row
+        self.canvas.create_text(label_x, stats_y_position + 51, text="Attackers Won:", 
+                            anchor=tk.NW, font=("Arial", 8), fill="black")
+        self.canvas.create_text(number_x, stats_y_position + 51, text=str(attacker_land_wins_count), 
+                            anchor=tk.NE, font=("Arial", 8), fill="black")
+
+        # Defender wins row
+        self.canvas.create_text(label_x, stats_y_position + 63, text="Defenders Won:", 
+                            anchor=tk.NW, font=("Arial", 8), fill="black")
+        self.canvas.create_text(number_x, stats_y_position + 63, text=str(defender_land_wins_count), 
+                            anchor=tk.NE, font=("Arial", 8), fill="black")
+
+        # Naval battles summary
+        naval_battles_count = len(naval_stats['naval_battles'])
+        attacker_naval_wins_count = sum(1 for b in naval_stats['naval_battles'] if b.result is True)
+        defender_naval_wins_count = sum(1 for b in naval_stats['naval_battles'] if b.result is False)
+
+        # Naval battles icon
+        if navy_icon:
+            photo_navy_icon = ImageTk.PhotoImage(navy_icon)
+            self.image_refs.append(photo_navy_icon)
+            navy_icon_id = self.canvas.create_image(detail_x + 215, stats_y_position + 91, anchor=tk.NW, image=photo_navy_icon)
+            self._tab3_widgets.append(navy_icon_id)
+
+        # Naval battles row
+        self.canvas.create_text(label_x, stats_y_position + 85, text="Naval Battles:", 
+                            anchor=tk.NW, font=("Arial", 8), fill="black")
+        self.canvas.create_text(number_x, stats_y_position + 85, text=str(naval_battles_count), 
+                            anchor=tk.NE, font=("Arial", 8), fill="black")
+
+        # Attacker naval wins row
+        self.canvas.create_text(label_x, stats_y_position + 97, text="Attackers Won:", 
+                            anchor=tk.NW, font=("Arial", 8), fill="black")
+        self.canvas.create_text(number_x, stats_y_position + 97, text=str(attacker_naval_wins_count), 
+                            anchor=tk.NE, font=("Arial", 8), fill="black")
+
+        # Defender naval wins row
+        self.canvas.create_text(label_x, stats_y_position + 109, text="Defenders Won:", 
+                            anchor=tk.NW, font=("Arial", 8), fill="black")
+        self.canvas.create_text(number_x, stats_y_position + 109, text=str(defender_naval_wins_count), 
+                            anchor=tk.NE, font=("Arial", 8), fill="black")
+
+        # ===== SIDE MILITARY STATISTICS (ARMY SIZE, LOSSES, SHIPS, etc.) =====
+        # Position the side stats lower to make room for the battle win statistics
+        side_stats_y_position = stats_y_position + 47  # Increased spacing
+
+        # Draw attacker military stats (left side)
+        self._draw_side_military_stats(war, detail_x, side_stats_y_position, is_attacker=True, 
+                                    land_stats=land_stats, naval_stats=naval_stats)
+
+        # Draw defender military stats (right side)  
+        self._draw_side_military_stats(war, detail_x + 424, side_stats_y_position, is_attacker=False,
+                                    land_stats=land_stats, naval_stats=naval_stats)
+
+        # ===== WAR SCORE VISUALIZATION =====
+        self._draw_war_score_visualization(war, detail_x + 2, detail_y)
+
+        # ===== WAR GOALS DISPLAY - RESTORE ORIGINAL POSITION =====
+        if war.goals:
+            war_goal = war.goals[0]
+            translated_goal = self._translate_war_goal(war_goal, war)
+            cb_name = war_goal.casus_belli
+            
+            # ===== CB ICON =====
+            if cb_name:
+                cb_name_for_icon = cb_name.replace('_small', '')
+                cb_icon = self._get_cb_icon(cb_name_for_icon)
+                if cb_icon:
+                    # Ensure transparency
+                    if cb_icon.mode != 'RGBA':
+                        cb_icon = cb_icon.convert('RGBA')
+                    
+                    # RESTORE ORIGINAL SIZE (24x24)
+                    cb_icon = cb_icon.resize((24, 24), Image.Resampling.LANCZOS)
+                    
+                    photo_icon = ImageTk.PhotoImage(cb_icon)
+                    self.image_refs.append(photo_icon)
+                    
+                    # ORIGINAL POSITION: to the left of goal text
+                    icon_x_position = detail_x + 176
+                    icon_y_position = detail_y + 80
+                    icon_id = self.canvas.create_image(icon_x_position, icon_y_position, 
+                                                    anchor=tk.NW, image=photo_icon)
+                    self._tab3_widgets.append(icon_id)
+            
+            # ===== GOAL TEXT (SEPARATE) =====
+            goal_strip = Image.new("RGBA", (588, 15), (0, 0, 0, 0))
+            draw_goal = ImageDraw.Draw(goal_strip)
+            
+            # Draw TRANSLATED goal text
+            bbox_goal = arial_font.getbbox(translated_goal)
+            text_width_goal = bbox_goal[2] - bbox_goal[0]
+            
+            # ADJUST TEXT POSITION RELATIVE TO ICON - MOVED FURTHER RIGHT
+            text_x_goal = max(0, (588 - text_width_goal) // 2)
+            text_y_goal = 0
+            
+            # Draw black text with Arial font for goal
+            draw_goal.text((text_x_goal, text_y_goal), translated_goal, font=arial_font, fill=(255, 255, 255, 255))
+            
+            photo_goal = ImageTk.PhotoImage(goal_strip)
+            self.image_refs.append(photo_goal)
+            
+            # ADJUST TEXT POSITION HERE - MOVED FURTHER RIGHT
+            goal_text_x_position = detail_x + 20  # Move text 10px to the right from icon
+            goal_text_y_position = detail_y - 4  # Same Y as icon
+            goal_id = self.canvas.create_image(goal_text_x_position, goal_text_y_position, anchor=tk.NW, image=photo_goal)
+            self._tab3_widgets.append(goal_id)
+                                
+        # ===== COMPACT SUMMARY WITHOUT DATE OR GOALS =====
+        # Create compact summary frame (positioned below war goals)
+        summary_frame = tk.Frame(self.root, bg=BG_COLOR)
+        
+        # Calculate summary position based on number of war goals
+        summary_y_position = detail_y + 188
+
+            
+        frame_wid = self.canvas.create_window(detail_x, summary_y_position, anchor=tk.NW, window=summary_frame)
+        self._tab3_widgets.append(frame_wid)
+        
+        # ===== BATTLE LIST WITH SORT BUTTONS =====
+        if war.battles:
+            # Draw battle sort buttons INSTEAD OF the "Battles:" label
+            self._draw_battle_sort_buttons()
+            
+            # Create scrollable battles list below sort buttons
+            battles_scrollable = ScrollableList(self.canvas, self.root, self.state, 
+                                            detail_x - 3, summary_y_position + 60,  # Adjust Y position if needed
+                                            639, 287, self.scrollbar_assets, row_height=24)
+            battles_scrollable.create()
+            
+            # Load battle row background
+            battle_bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_countrybutton.dds"))
+            battle_row_bg = self._load_battle_row_background(battle_bg_path)
+            
+            for i, battle in enumerate(war.battles):
+                self._draw_battle_row(battles_scrollable.frame_inside, battle, i, battle_row_bg)
+        else:
+            no_battles_label = tk.Label(
+                self.root,
+                text="No battles recorded",
+                font=("Arial", 9),
+                bg=BG_COLOR
+            )
+            no_battles_id = self.canvas.create_window(detail_x, summary_y_position + 50, anchor=tk.NW, window=no_battles_label)
+            self._tab3_widgets.append(no_battles_id)
+
+    def _calculate_land_statistics(self, war: War) -> Dict:
+        """Calculate land battle statistics - ONLY COUNTING LAND UNITS."""
+        # Load unit types to properly identify land battles
+        if not hasattr(self, '_unit_types'):
+            self._unit_types = UnitTypeClassifier.load_unit_types(self.state)
+        
+        land_battles = []
+        attacker_land_wins = 0
+        defender_land_wins = 0
+        
+        for battle in war.battles:
+            # Check if this is primarily a land battle by counting unit types
+            attacker_units = battle.attacker.get('units', {})
+            defender_units = battle.defender.get('units', {})
+            
+            land_units_count = 0
+            naval_units_count = 0
+            
+            # Count land vs naval units for both sides
+            for unit_type, count in attacker_units.items():
+                unit_category = self._unit_types.get(unit_type, 'infantry')
+                if UnitTypeClassifier.is_land_unit(unit_category):
+                    land_units_count += count
+                elif UnitTypeClassifier.is_naval_unit(unit_category):
+                    naval_units_count += count
+            
+            for unit_type, count in defender_units.items():
+                unit_category = self._unit_types.get(unit_type, 'infantry')
+                if UnitTypeClassifier.is_land_unit(unit_category):
+                    land_units_count += count
+                elif UnitTypeClassifier.is_naval_unit(unit_category):
+                    naval_units_count += count
+            
+            # Consider it a land battle if it has more land units than naval units
+            # OR if it has any land units at all (mixed battles count as land)
+            if land_units_count > 0 and land_units_count >= naval_units_count:
+                land_battles.append(battle)
+                if battle.result is True:
+                    attacker_land_wins += 1
+                elif battle.result is False:
+                    defender_land_wins += 1
+        
+        return {
+            'land_battles': land_battles,
+            'attacker_land_wins': attacker_land_wins,
+            'defender_land_wins': defender_land_wins
+        }
+
+    def _calculate_naval_statistics(self, war: War) -> Dict:
+        """Calculate naval battle statistics - ONLY COUNTING NAVAL UNITS."""
+        # Load unit types to properly identify naval battles
+        if not hasattr(self, '_unit_types'):
+            self._unit_types = UnitTypeClassifier.load_unit_types(self.state)
+        
+        naval_battles = []
+        attacker_naval_wins = 0
+        defender_naval_wins = 0
+        
+        for battle in war.battles:
+            # Check if this is primarily a naval battle by counting unit types
+            attacker_units = battle.attacker.get('units', {})
+            defender_units = battle.defender.get('units', {})
+            
+            land_units_count = 0
+            naval_units_count = 0
+            
+            # Count land vs naval units for both sides
+            for unit_type, count in attacker_units.items():
+                unit_category = self._unit_types.get(unit_type, 'infantry')
+                if UnitTypeClassifier.is_land_unit(unit_category):
+                    land_units_count += count
+                elif UnitTypeClassifier.is_naval_unit(unit_category):
+                    naval_units_count += count
+            
+            for unit_type, count in defender_units.items():
+                unit_category = self._unit_types.get(unit_type, 'infantry')
+                if UnitTypeClassifier.is_land_unit(unit_category):
+                    land_units_count += count
+                elif UnitTypeClassifier.is_naval_unit(unit_category):
+                    naval_units_count += count
+            
+            # Consider it a naval battle if it has more naval units than land units
+            # OR if it has any naval units at all (mixed battles count as naval if navy dominates)
+            if naval_units_count > 0 and naval_units_count >= land_units_count:
+                naval_battles.append(battle)
+                if battle.result is True:
+                    attacker_naval_wins += 1
+                elif battle.result is False:
+                    defender_naval_wins += 1
+        
+        # Rest of the ship type detection code remains the same...
+        has_dreadnoughts = False
+        has_battleships = False
+        has_ironclads = False
+        
+        for battle in naval_battles:
+            attacker_units = battle.attacker.get('units', {})
+            defender_units = battle.defender.get('units', {})
+            
+            # Check for ship types
+            if attacker_units.get('dreadnought', 0) > 0 or defender_units.get('dreadnought', 0) > 0:
+                has_dreadnoughts = True
+            if attacker_units.get('battleship', 0) > 0 or defender_units.get('battleship', 0) > 0:
+                has_battleships = True
+            if attacker_units.get('ironclad', 0) > 0 or defender_units.get('ironclad', 0) > 0:
+                has_ironclads = True
+        
+        # Determine crop coordinates based on ship types
+        if has_dreadnoughts:
+            crop_left, crop_right = 324, 0
+        elif has_battleships:
+            crop_left, crop_right = 288, 36
+        elif has_ironclads:
+            crop_left, crop_right = 180, 144
+        else:
+            crop_left, crop_right = 0, 324
+        
+        return {
+            'naval_battles': naval_battles,
+            'attacker_naval_wins': attacker_naval_wins,
+            'defender_naval_wins': defender_naval_wins,
+            'ship_crop_left': crop_left,
+            'ship_crop_right': crop_right
+        }
+
+    def _draw_side_military_stats(self, war: War, x: int, y: int, is_attacker: bool, 
+                                land_stats: Dict, naval_stats: Dict):
+        """Draw military statistics for one side (attacker or defender) - SEPARATING LAND AND NAVAL."""
+        # Load unit types to distinguish between land and naval units
+        if not hasattr(self, '_unit_types'):
+            self._unit_types = UnitTypeClassifier.load_unit_types(self.state)
+        
+        # Calculate side-specific statistics - SEPARATE LAND AND NAVAL
+        total_land_army = 0
+        total_land_losses = 0
+        total_naval_ships = 0
+        total_naval_losses = 0
+        
+        for battle in war.battles:
+            if is_attacker:
+                units = battle.attacker.get('units', {})
+                losses = battle.attacker.get('losses', 0)
+            else:
+                units = battle.defender.get('units', {})
+                losses = battle.defender.get('losses', 0)
+            
+            # Separate land and naval units
+            land_units_in_battle = 0
+            naval_units_in_battle = 0
+            
+            for unit_type, count in units.items():
+                unit_category = self._unit_types.get(unit_type, 'infantry')  # Default to infantry if unknown
+                
+                if UnitTypeClassifier.is_land_unit(unit_category):
+                    land_units_in_battle += count
+                elif UnitTypeClassifier.is_naval_unit(unit_category):
+                    naval_units_in_battle += count
+                else:
+                    # Default to land if we can't determine
+                    land_units_in_battle += count
+            
+            total_land_army += land_units_in_battle
+            total_naval_ships += naval_units_in_battle
+            
+            # Distribute losses proportionally between land and naval
+            total_units_in_battle = land_units_in_battle + naval_units_in_battle
+            if total_units_in_battle > 0:
+                land_loss_ratio = land_units_in_battle / total_units_in_battle
+                naval_loss_ratio = naval_units_in_battle / total_units_in_battle
+            else:
+                land_loss_ratio = 1.0  # Default to land if no units
+                naval_loss_ratio = 0.0
+            
+            total_land_losses += int(losses * land_loss_ratio)
+            total_naval_losses += int(losses * naval_loss_ratio)
+        
+        # Draw land army icon and text
+        army_icon_path = self.state.get_modded_path(os.path.join("gfx", "interface", "pops_mini.dds"))
+        army_icon = SafeLoader.safe_load_image(army_icon_path)
+        if army_icon:
+            # Crop 192px from left, 160px from right to get 32x32
+            army_cropped = army_icon.crop((192, 0, 192 + 32, 32))
+            photo_army = ImageTk.PhotoImage(army_cropped)
+            self.image_refs.append(photo_army)
+            self.canvas.create_image(x, y - 2, anchor=tk.NW, image=photo_army)
+        
+        # Draw land army text - NOW ONLY LAND UNITS - FIXED: Separate labels and numbers
+        label_x = x + 35
+        number_x = x + 195  # Fixed position for numbers
+
+        # Army size
+        self.canvas.create_text(label_x, y + 4, text="Army size:", 
+                            anchor=tk.NW, font=("Arial", 8), fill="black")
+        self.canvas.create_text(number_x, y + 4, text=f"{total_land_army:,}", 
+                            anchor=tk.NE, font=("Arial", 8), fill="black")
+
+        # Army losses
+        self.canvas.create_text(label_x, y + 16, text="Losses:", 
+                            anchor=tk.NW, font=("Arial", 8), fill="black")
+        self.canvas.create_text(number_x, y + 16, text=f"{total_land_losses:,}", 
+                            anchor=tk.NE, font=("Arial", 8), fill="black")
+
+        # Draw naval ships icon and text - NOW ONLY NAVAL UNITS
+        ships_icon_path = self.state.get_modded_path(os.path.join("gfx", "interface", "unit_strip_naval_combat_1_R.dds"))
+        ships_icon = SafeLoader.safe_load_image(ships_icon_path)
+        if ships_icon:
+            # Crop based on ship types found
+            crop_left = naval_stats['ship_crop_left']
+            crop_right = naval_stats['ship_crop_right']
+            ships_cropped = ships_icon.crop((crop_left, 0, 360 - crop_right, 36))
+            ships_cropped = ships_cropped.resize((32, 32), Image.Resampling.LANCZOS)
+            photo_ships = ImageTk.PhotoImage(ships_cropped)
+            self.image_refs.append(photo_ships)
+            self.canvas.create_image(x, y + 46, anchor=tk.NW, image=photo_ships)
+
+        # Navy size
+        self.canvas.create_text(label_x, y + 50, text="Navy size:", 
+                            anchor=tk.NW, font=("Arial", 8), fill="black")
+        self.canvas.create_text(number_x, y + 50, text=f"{total_naval_ships:,}", 
+                            anchor=tk.NE, font=("Arial", 8), fill="black")
+
+        # Navy sunk
+        self.canvas.create_text(label_x, y + 62, text="Sunk:", 
+                            anchor=tk.NW, font=("Arial", 8), fill="black")
+        self.canvas.create_text(number_x, y + 62, text=f"{total_naval_losses:,}", 
+                            anchor=tk.NE, font=("Arial", 8), fill="black")
+
+    def _create_button(self, text: str, command, width: int = 144, height: int = 36) -> tk.Label:
+        """Create a styled button using game graphics."""
+        btn_path = self.state.get_modded_path(os.path.join("gfx", "interface", "button_standard_144.tga"))
+        btn_img = SafeLoader.safe_load_image(btn_path, size=(width, height))
+        
+        if not btn_img:
+            return tk.Button(self.root, text=text, command=command)
+        
+        draw = ImageDraw.Draw(btn_img)
+        bbox = self.font_manager.font_14.getbbox(text)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        draw.text(((btn_img.width - text_width) // 2, (btn_img.height - text_height) // 2),
+                 text, font=self.font_manager.font_14, fill="black")
+        
+        photo = ImageTk.PhotoImage(btn_img)
+        self.image_refs.append(photo)
+        
+        label = tk.Label(self.root, image=photo, cursor="hand2", borderwidth=0, highlightthickness=0, bg=BG_COLOR)
+        label.photo = photo
+        label.bind("<Button-1>", lambda e: command())
+        return label
+    
+    def _draw_tabs(self):
+        """Draw tab buttons."""
+        tab_width = 144
+        tab_height = 25
+
+        for i, (key, tab_data) in enumerate(self.tab_definitions.items()):
+            x = 29 + i * (tab_width + 16)
+            y = 23
+
+            img = Image.new("RGBA", (tab_width, tab_height), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            text = tab_data["label"]
+            bbox = self.font_manager.font_16.getbbox(text)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            draw.text(((tab_width - text_width) // 2, (tab_height - text_height) // 2),
+                     text, font=self.font_manager.font_16, fill=(0, 0, 0))
+
+            photo = ImageTk.PhotoImage(img)
+            self.image_refs.append(photo)
+
+            canvas_id = self.canvas.create_image(x, y, anchor=tk.NW, image=photo, tags=(f"tab_{key}",))
+            self.canvas.tag_bind(f"tab_{key}", "<Button-1>", lambda e, k=key: self._on_tab_click(k))
+    
+    def _draw_tab_content(self, tab_name: str):
+        """Draw content for a specific tab with proper cleanup"""
+        # COMPREHENSIVE CLEANUP
+        self.canvas.delete("all")
+        if hasattr(self, "_tab3_widgets"):
+            for wid in self._tab3_widgets:
+                try:
+                    self.canvas.delete(wid)
+                except:
+                    pass
+            self._tab3_widgets.clear()
+        
+        # Clear flag tag maps
+        if hasattr(self, '_flag_tag_maps'):
+            self._flag_tag_maps.clear()
+        
+        # Clear all image references
+        self.image_refs.clear()
+        
+        # Now draw new content
+        layer_items = self.layer_cache.get(tab_name)
+        if layer_items:
+            for photo, pos in layer_items:
+                try:
+                    self.canvas.create_image(*pos, anchor=tk.NW, image=photo)
+                    self.image_refs.append(photo)
+                except Exception:
+                    pass
+
+        self._draw_tabs()
+
+        if tab_name == "Tab1":
+            self._draw_settings_tab()
+        elif tab_name == "Tab2":
+            self._draw_wars_tab()
+        elif tab_name == "Tab3":
+            self._draw_war_details_tab()
+
+    def _clear_mod_caches(self):
+        """Clear all caches that contain mod-specific data."""
+        # Clear image cache
+        self.state.image_cache.clear()
+
+        # Clear all file parsing caches
+        self.state._localization_cache = None
+        self.state._government_cache_loaded = False
+        self.state._culture_mappings_cache = None
+        self.state._cb_types_cache = None
+        self.state._unit_types_cache = None
+        
+        # Clear government data
+        self.state.gov_to_flagtype = {}
+        self.state.gov_index_map = {}
+        
+        # Clear country data
+        self.state._parsed_great_nations = None
+        self.state._parsed_country_governments = {}
+        self.state._parsed_country_cultures = {}
+        
+        # Clear localization
+        self.state.localization_names = {}
+        
+        # Clear wars data (since countries might be different)
+        self.state._wars_data = None
+        self.state._save_file_text = None
+        self.state.filtered_wars = []
+        
+        # Clear country rankings and selections
+        self.state.country_rankings = {}
+        self.state.selected_countries.clear()
+        self.state.selected_war_index = None
+        
+        # Clear CB icons
+        if hasattr(self, '_cb_icons'):
+            self._cb_icons.clear()
+        if hasattr(self, '_cb_icons_loaded'):
+            self._cb_icons_loaded = False
+        if hasattr(self, 'cb_to_sprite'):
+            self.cb_to_sprite.clear()
+        
+        # Clear unit types cache
+        if hasattr(self, '_unit_types'):
+            delattr(self, '_unit_types')
+        
+        # Clear culture mappings
+        if hasattr(self.state, '_culture_to_leader'):
+            delattr(self.state, '_culture_to_leader')
+        
+        # Clear flag tooltip cache
+        if hasattr(self, '_flag_tooltip_cache'):
+            self._flag_tooltip_cache.clear()
+    
+    def _draw_settings_tab(self):
+        """Draw the settings tab content."""
+        # Mod selector
+        def choose_mod():
+            folder_path = filedialog.askdirectory(title="Select Mod Folder")
+            if folder_path:
+                self.state.mod_name = os.path.basename(folder_path)
+                self.state.config.default_mod = self.state.mod_name
+                self.state.config.last_mod = self.state.mod_name
+                self.state.config.save()
+                
+                # CLEAR ALL MOD-SPECIFIC CACHES
+                self._clear_mod_caches()
+                
+                self._reload_assets()
+                self._reload_cb_icons()
+                self.mod_label.config(text=f"Current Mod: {self.state.mod_name}")
+
+        def clear_mod():
+            self.state.mod_name = "None"
+            self.state.config.default_mod = "None"
+            self.state.config.last_mod = "None"
+            self.state.config.save()
+            
+            # CLEAR ALL MOD-SPECIFIC CACHES
+            self._clear_mod_caches()
+            
+            self._reload_assets()
+            self._reload_cb_icons()
+            self.mod_label.config(text=f"Current Mod: {self.state.mod_name}")
+        
+        mod_btn = self._create_button("Select Mod Folder", choose_mod)
+        self.canvas.create_window(30, 70, anchor=tk.NW, window=mod_btn)
+        
+        clear_btn = self._create_button("Clear Mod", clear_mod)
+        self.canvas.create_window(200, 70, anchor=tk.NW, window=clear_btn)
+        
+        self.mod_label = tk.Label(self.root, text=f"Current Mod: {self.state.mod_name}", bg=BG_COLOR, font=("Arial", 10))
+        self.canvas.create_window(30, 110, anchor=tk.NW, window=self.mod_label)
+        
+        # Custom checkboxes
+        self.auto_load_checkbox = CustomCheckbox(
+            self.canvas, 
+            self.state, 
+            'auto_load_last', 
+            "Auto-load last save file", 
+            350, 148
+        )
+
+        def on_auto_load_toggle(value):
+            pass 
+
+        self.auto_load_checkbox = CustomCheckbox(
+            self.canvas, 
+            self.state, 
+            'auto_load_last', 
+            "Auto-load last save file", 
+            350, 148,
+            callback=on_auto_load_toggle
+        )
+        
+        # Save file selector
+        def choose_save():
+            file_path = filedialog.askopenfilename(
+                title="Select Save File",
+                filetypes=[("Victoria 2 Save Files", "*.v2"), ("All Files", "*.*")]
+            )
+            if file_path:
+                self.state.save_file_path = file_path
+                self.save_label.config(text=self.state.save_file_path)
+                
+                # Add to recent files (avoid duplicates)
+                if file_path in self.state.config.recent_files:
+                    self.state.config.recent_files.remove(file_path)
+                self.state.config.recent_files.insert(0, file_path)
+                self.state.config.recent_files = self.state.config.recent_files[:5]
+                self.state.config.save()
+                
+                # Refresh recent files display
+                self._refresh_recent_files()
+        
+        save_btn = self._create_button("Select Save File", choose_save)
+        self.canvas.create_window(30, 140, anchor=tk.NW, window=save_btn)
+        
+        load_btn = self._create_button("Load Save File", self.load_save)
+        self.canvas.create_window(200, 140, anchor=tk.NW, window=load_btn)
+        
+        self.save_label = tk.Label(self.root, text=self.state.save_file_path, wraplength=640, 
+                                justify=tk.LEFT, bg=BG_COLOR, font=("Arial", 9))
+        self.canvas.create_window(30, 180, anchor=tk.NW, window=self.save_label)
+        
+        # Recent files section
+        recent_label = tk.Label(self.root, text="Recent Files:", bg=BG_COLOR, font=("Arial", 10, "bold"))
+        self.canvas.create_window(30, 320, anchor=tk.NW, window=recent_label)
+        
+        # Display recent files
+        recent_y = 350
+        self.recent_file_buttons = []
+        
+        for i, file_path in enumerate(self.state.config.recent_files):
+            if os.path.exists(file_path):
+                filename = os.path.basename(file_path)
+                btn = tk.Label(self.root, text=f"{i+1}. {filename}", 
+                            cursor="hand2", bg=BG_COLOR, font=("Arial", 9), fg="blue")
+                btn.bind("<Button-1>", lambda e, path=file_path: self._load_recent_file(path))
+                self.canvas.create_window(30, recent_y, anchor=tk.NW, window=btn)
+                self.recent_file_buttons.append(btn)
+                recent_y += 25
+    
+    def _draw_wars_tab(self):
+        """Draw the wars list tab."""
+        self._rebuild_filtered_wars()
+        
+        # War list - pass the gui instance (self) as the last parameter
+        war_list = WarList(self.canvas, self.root, self.state, self.scrollbar_assets, 
+                        self.font_manager, self.image_refs, self._on_tab_click, self)  # Added self as last parameter
+        war_list.create(self.state.filtered_wars)
+        
+        # ADD SORT BUTTONS HERE
+        self._draw_sort_buttons()
+        
+        # Country filter
+        country_filter = CountryFilter(self.canvas, self.root, self.state, 
+                                    self.scrollbar_assets, self.image_refs, 
+                                    self._rebuild_and_refresh, self)
+        country_filter.create()
+
+    def _draw_clear_filter_button(self, button_file: str, x: int, y: int, width: int, height: int, text: str, crop_top: int, crop_bottom: int):
+        """Draw the clear filter button with click functionality."""
+        button_path = self.state.get_modded_path(
+            os.path.join("gfx", "interface", button_file)
+        )
+        button_img = SafeLoader.safe_load_image(button_path)
+        
+        if button_img:
+            if crop_top > 0 or crop_bottom > 0:
+                # Crop the image
+                cropped_img = ImageLoader.crop(button_img, top=crop_top, bottom=crop_bottom)
+            else:
+                # No cropping needed
+                cropped_img = button_img
+            
+            # Resize to specified width and height
+            final_img = cropped_img.resize((width, height), Image.Resampling.LANCZOS)
+            
+            # Add text using custom font
+            if text:
+                draw = ImageDraw.Draw(final_img)
+                
+                # Use the custom font for text rendering
+                bbox = self.font_manager.font_14.getbbox(text)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                
+                # Calculate position for perfect vertical centering
+                try:
+                    # Try to get font metrics if available
+                    ascent, descent = self.font_manager.font_14.getmetrics()
+                    total_height = ascent + descent
+                    # Center based on actual font metrics
+                    text_x = (width - text_width) // 2
+                    text_y = (height - total_height) // 2 + ascent - 10  # Minor adjustment for visual centering
+                except:
+                    # Fallback if we can't get metrics
+                    text_x = (width - text_width) // 2
+                    text_y = (height - text_height) // 2 - 1
+                
+                # Draw text with custom font
+                draw.text((text_x, text_y), text, font=self.font_manager.font_14, fill="black")
+            
+            photo = ImageTk.PhotoImage(final_img)
+            self.image_refs.append(photo)
+            
+            # Create the button as a canvas image with click handler
+            button_id = self.canvas.create_image(x, y, anchor=tk.NW, image=photo)
+            
+            # Bind click event to clear filter
+            def clear_filter(event):
+                self.state.selected_countries.clear()
+                self._rebuild_and_refresh()
+            
+            self.canvas.tag_bind(button_id, "<Button-1>", clear_filter)
+        else:
+            # Fallback: draw rectangle and text if image loading fails
+            rect_id = self.canvas.create_rectangle(x, y, x + width, y + height, 
+                                                outline="#888", fill="#ccc")
+            # For fallback, use consistent positioning
+            text_id = self.canvas.create_text(
+                x + width // 2, 
+                y + height // 2,
+                text=text, 
+                font=("Arial", 10), 
+                fill="black",
+                anchor="center"
+            )
+            
+            # Bind click event to clear filter for fallback button
+            def clear_filter(event):
+                self.state.selected_countries.clear()
+                self._rebuild_and_refresh()
+            
+            self.canvas.tag_bind(rect_id, "<Button-1>", clear_filter)
+            self.canvas.tag_bind(text_id, "<Button-1>", clear_filter)
+
+    def _draw_sort_buttons(self):
+        """Draw all sort buttons above the country filter."""
+        # Calculate war count for display
+        war_count = len(self.state.filtered_wars)
+        total_wars = len(self.state.wars_data)
+        war_count_text = f"Wars: {war_count}/{total_wars}"  # Shorter format
+        buttons = [
+            ("sortbutton_164.dds", SORT_BUTTON_X, SORT_BUTTON_Y, 166, 20, "Country", 5, 7),
+            ("sortbutton_42.dds", SORT_BUTTON_X + 166, SORT_BUTTON_Y, 42, 20, "", 5, 7),
+            ("sortbutton_200.dds", SORT_BUTTON_X + 166 + 42, SORT_BUTTON_Y, 200, 20, war_count_text, 5, 7),
+            ("sortbutton_soi.dds", SORT_BUTTON_X + 174 + 42 + 24 * 8, SORT_BUTTON_Y, 28, 20, "", 0, 0),
+            ("sort_prestige_rank.dds", SORT_BUTTON_X + 174 + 42 + 24 * 8 + 28, SORT_BUTTON_Y, 24, 20, "", 2, 2),
+            ("sort_industry_rank.dds", SORT_BUTTON_X + 174 + 42 + 24 * 9 + 26, SORT_BUTTON_Y, 24, 20, "", 2, 2),
+            ("sort_military_rank.dds", SORT_BUTTON_X + 174 + 42 + 24 * 10 + 24, SORT_BUTTON_Y, 24, 20, "", 2, 2),
+            ("sortbutton_totalrank.dds", SORT_BUTTON_X + 174 + 42 + 24 * 11 + 22, SORT_BUTTON_Y, 24, 20, "", 0, 0),
+            ("sortbutton_68.dds", SORT_BUTTON_X + 174 + 42 + 24 * 12 + 20, SORT_BUTTON_Y, 68, 20, "Clear filter", 5, 7),
+            ("sortbutton_relation.dds", SORT_BUTTON_X + 174 + 42 + 24 * 12 + 20 + 68, SORT_BUTTON_Y, 28, 20, "", 0, 0),
+        ]
+        
+        for i, (button_file, x, y, width, height, text, crop_top, crop_bottom) in enumerate(buttons):
+            if text == "Clear filter":
+                # Create the clear filter button with click handler
+                self._draw_clear_filter_button(button_file, x, y, width, height, text, crop_top, crop_bottom)
+            else:
+                self._draw_single_sort_button(button_file, x, y, width, height, text, crop_top, crop_bottom)
+
+
+    def _draw_battle_sort_buttons(self):
+        """Draw sort buttons above the battle list in war details tab."""
+        # Define battle-specific sort buttons
+        battle_buttons = [
+            ("sortbutton_164.dds", SORT_BUTTON_X, SORT_BUTTON_Y, 166, 20, "Province", 5, 7),
+            ("sortbutton_42.dds", SORT_BUTTON_X + 166, SORT_BUTTON_Y, 42, 20, "Terrain", 5, 7),
+            ("sortbutton_200.dds", SORT_BUTTON_X + 166 + 42, SORT_BUTTON_Y, 200, 20, "", 5, 7),
+            ("sortbutton_soi.dds", SORT_BUTTON_X + 174 + 42 + 24 * 8, SORT_BUTTON_Y, 28, 20, "", 0, 0),
+            ("sort_prestige_rank.dds", SORT_BUTTON_X + 174 + 42 + 24 * 8 + 28, SORT_BUTTON_Y, 24, 20, "", 2, 2),
+            ("sort_industry_rank.dds", SORT_BUTTON_X + 174 + 42 + 24 * 9 + 26, SORT_BUTTON_Y, 24, 20, "", 2, 2),
+            ("sort_military_rank.dds", SORT_BUTTON_X + 174 + 42 + 24 * 10 + 24, SORT_BUTTON_Y, 24, 20, "", 2, 2),
+            ("sortbutton_totalrank.dds", SORT_BUTTON_X + 174 + 42 + 24 * 11 + 22, SORT_BUTTON_Y, 24, 20, "", 0, 0),
+            ("sortbutton_68.dds", SORT_BUTTON_X + 174 + 42 + 24 * 12 + 20, SORT_BUTTON_Y, 68, 20, "", 5, 7),
+            ("sortbutton_relation.dds", SORT_BUTTON_X + 174 + 42 + 24 * 12 + 20 + 68, SORT_BUTTON_Y, 28, 20, "", 0, 0),
+        ]
+        
+        for button_file, x, y, width, height, text, crop_top, crop_bottom in battle_buttons:
+            self._draw_single_sort_button(button_file, x, y, width, height, text, crop_top, crop_bottom)
+
+    def _draw_single_sort_button(self, button_file: str, x: int, y: int, width: int, height: int, text: str, crop_top: int, crop_bottom: int):
+        """Draw a single sort button with the specified parameters."""
+        button_path = self.state.get_modded_path(
+            os.path.join("gfx", "interface", button_file)
+        )
+        button_img = SafeLoader.safe_load_image(button_path)
+        
+        if button_img:
+            if crop_top > 0 or crop_bottom > 0:
+                # Crop the image
+                cropped_img = ImageLoader.crop(button_img, top=crop_top, bottom=crop_bottom)
+            else:
+                # No cropping needed
+                cropped_img = button_img
+            
+            # Resize to specified width and height
+            final_img = cropped_img.resize((width, height), Image.Resampling.LANCZOS)
+            
+            # Add text using custom font if specified
+            if text:
+                draw = ImageDraw.Draw(final_img)
+                
+                # Use the custom font for text rendering
+                bbox = self.font_manager.font_14.getbbox(text)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                
+                # Calculate position for perfect vertical centering
+                try:
+                    # Try to get font metrics if available
+                    ascent, descent = self.font_manager.font_14.getmetrics()
+                    total_height = ascent + descent
+                    # Center based on actual font metrics
+                    text_x = (width - text_width) // 2
+                    text_y = (height - total_height) // 2 + ascent - 10  # Minor adjustment for visual centering
+                except:
+                    # Fallback if we can't get metrics
+                    text_x = (width - text_width) // 2
+                    text_y = (height - text_height) // 2 - 1
+                
+                # Draw text with custom font
+                draw.text((text_x, text_y), text, font=self.font_manager.font_14, fill="black")
+            
+            photo = ImageTk.PhotoImage(final_img)
+            self.image_refs.append(photo)
+            button_id = self.canvas.create_image(x, y, anchor=tk.NW, image=photo)
+            
+            # ADD CLICK HANDLER FOR CLEAR FILTER BUTTON
+            if text == "Clear filter":
+                def clear_filter(event):
+                    self.state.selected_countries.clear()
+                    self._rebuild_and_refresh()
+                    # After clearing filter, redraw the tab to update the war count
+                    self._draw_tab_content("Tab2")
+                self.canvas.tag_bind(button_id, "<Button-1>", clear_filter)
+            
+        else:
+            # Fallback: draw rectangle and text if image loading fails
+            rect_id = self.canvas.create_rectangle(x, y, x + width, y + height, 
+                                                outline="#888", fill="#ccc")
+            if text:
+                # For fallback, use consistent positioning
+                text_id = self.canvas.create_text(
+                    x + width // 2, 
+                    y + height // 2,
+                    text=text, 
+                    font=("Arial", 10), 
+                    fill="black",
+                    anchor="center"
+                )
+                
+                # ADD CLICK HANDLER FOR CLEAR FILTER BUTTON - UPDATED
+                if text == "Clear filter":
+                    def clear_filter(event):
+                        self.state.selected_countries.clear()
+                        self._rebuild_filtered_wars()  # Just update the filtered list
+                        self._draw_tab_content("Tab2")  # Redraw the tab to refresh display
+                    self.canvas.tag_bind(button_id, "<Button-1>", clear_filter)
+        
+    def _get_all_filter_countries(self) -> List[str]:
+        """Get all countries that should appear in the filter list."""
+        all_tags = set()
+        for war in self.state.wars_data:
+            all_tags.update(war.attackers)
+            all_tags.update(war.defenders)
+        return sorted([t for t in all_tags if t and t != "---"])
+    
+    def _rebuild_filtered_wars(self):
+        """Rebuild the filtered wars list based on selected countries - uses cached data."""
+        if not self.state.selected_countries:
+            self.state.filtered_wars = self.state._wars_data[:] if self.state._wars_data else []
+            return
+        
+        filtered = []
+        for war in self.state._wars_data:
+            attackers = set(war.attackers)
+            defenders = set(war.defenders)
+            if attackers.intersection(self.state.selected_countries) or \
+            defenders.intersection(self.state.selected_countries):
+                filtered.append(war)
+        
+        self.state.filtered_wars = filtered
+    
+    def _rebuild_and_refresh(self):
+        """Rebuild filtered wars and refresh the display."""
+        self._rebuild_filtered_wars()
+        self._draw_tab_content("Tab2")
+    
+    def _reload_assets(self):
+        """Reload all assets after mod change."""
+        self.state.image_cache.clear()
+        self._load_government_data()
+        self.layer_cache.build(self.tab_definitions)
+        self._draw_tab_content(self.current_tab)
+
+    def _create_status_bar(self):
+        """Create a status bar at the bottom of the window."""
+        self.status_var = tk.StringVar()
+        self.status_var.set("Ready")
+        
+        status_bar = tk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, 
+                            anchor=tk.W, bg=BG_COLOR, font=("Arial", 9))
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Store reference
+        self.status_bar = status_bar
+
+    def _set_status(self, message):
+        """Update the status bar message."""
+        if hasattr(self, 'status_var'):
+            self.status_var.set(message)
+            self.root.update_idletasks()
+
+    def _clear_status(self):
+        """Clear the status bar."""
+        if hasattr(self, 'status_var'):
+            self.status_var.set("Ready")
+    
+    def _on_tab_click(self, tab_name: str):
+        """Handle tab click with status update."""
+        self.current_tab = tab_name
+        self._set_status(f"Loading {self.tab_definitions[tab_name]['label']}...")
+        self._draw_tab_content(tab_name)
+        self._clear_status()
+    
+    def cleanup(self):
+        """Clean up resources before closing."""
+        try:
+            self.state.config.save()
+            self.state.image_cache.clear()
+            self.layer_cache.clear()
+            self.image_refs.clear()
+            self.root.destroy()
+        except Exception:
+            pass
+
+
+class WarList:
+    """Renders the scrollable list of wars."""
+    
+    def __init__(self, parent_canvas, root, state, scrollbar_assets, font_manager, image_refs, on_war_select, gui=None):
+        self.parent_canvas = parent_canvas
+        self.root = root
+        self.state = state
+        self.sb_assets = scrollbar_assets
+        self.font_manager = font_manager
+        self.image_refs = image_refs
+        self.on_war_select = on_war_select
+        self.gui = gui
+    
+    def create(self, wars: List[War]):
+        """Create the war list."""
+        scrollable = ScrollableList(self.parent_canvas, self.root, self.state, WAR_LIST_X, WAR_LIST_Y, 
+                                   WAR_LIST_WIDTH, WAR_LIST_HEIGHT, self.sb_assets, row_height=56)
+        scrollable.create()
+        
+        overlay_path = self.state.get_modded_path(os.path.join("gfx", "interface", "flag_overlay_new.tga"))
+        flag_overlay = SafeLoader.safe_load_image(overlay_path, size=(FLAG_WIDTH, FLAG_HEIGHT))
+        
+        bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_entrybg.dds"))
+        entry_bg = SafeLoader.safe_load_image(bg_path)
+        
+        for idx, war in enumerate(wars):
+            self._draw_war_row(scrollable.frame_inside, war, idx, flag_overlay, entry_bg)
+
+    def _determine_background_crop(self, war: War) -> str:
+        """Determine which part of the background to crop based on player involvement and war status."""
+        # Check if this is an active war
+        is_active_war = self._is_active_war(war)
+        
+        # Check if player country is involved in this war
+        player_involved = self._is_player_involved(war)
+        
+        # Determine crop position
+        if player_involved:
+            return "center"  # Player is involved - use center crop
+        elif is_active_war:
+            return "right"   # Active war but player not involved - use right crop
+        else:
+            return "left"    # Inactive war, player not involved - use left crop
+
+    def _is_active_war(self, war: War) -> bool:
+        """Determine if this is an active war."""
+        return war.is_active
+
+    def _is_player_involved(self, war: War) -> bool:
+        """Check if the player's country is involved in this war."""
+        # Get player country tag from save file
+        player_tag = self._get_player_country_tag()
+        
+        if not player_tag:
+            return False
+        
+        # Check if player is in attackers or defenders
+        return player_tag in war.attackers or player_tag in war.defenders
+
+    def _get_player_country_tag(self) -> Optional[str]:
+        """Extract player country tag from save file text."""
+        if not hasattr(self.state, 'save_file_text') or not self.state.save_file_text:
+            return None
+        
+        # Look for the pattern: player="TAG" (usually on the second line)
+        player_match = re.search(r'player\s*=\s*"([A-Z]{3})"', self.state.save_file_text)
+        
+        if player_match:
+            return player_match.group(1)
+        
+        return None
+
+    def _draw_war_row(self, parent, war: War, index: int, flag_overlay: Optional[Image.Image], entry_bg: Optional[Image.Image]):
+        """Draw a single war row with dynamic background based on player involvement and war status."""
+        # Create frame with transparent background
+        row = tk.Frame(parent, bg=BG_COLOR, height=56)
+        row.pack(fill="x", pady=0)
+        
+        # Create canvas with transparent background
+        row_canvas = tk.Canvas(row, width=600, height=56, highlightthickness=0, bg=BG_COLOR)
+        row_canvas.pack(side="left", anchor="w")
+        
+        # Determine crop position based on player involvement and war status
+        crop_position = self._determine_background_crop(war)
+        
+        # Background - create with dynamic cropping
+        if entry_bg:
+            # Convert background to have transparency
+            bg_img = entry_bg
+            
+            # Simple cropping logic for 1800px wide image
+            if crop_position == "center":
+                # Crop 600px from center (600-1200 of 1800px)
+                row_bg = bg_img.crop((600, 0, 1200, bg_img.height))
+            elif crop_position == "right":
+                # Crop 600px from right (1200-1800 of 1800px)
+                row_bg = bg_img.crop((1200, 0, 1800, bg_img.height))
+            else:  # left (default)
+                # Crop 600px from left (0-600 of 1800px)
+                row_bg = bg_img.crop((0, 0, 600, bg_img.height))
+            
+            # Ensure the background image has alpha channel
+            if row_bg.mode != 'RGBA':
+                row_bg = row_bg.convert('RGBA')
+            
+            bg_small = row_bg.resize((600, 56), Image.Resampling.NEAREST)
+            photo = ImageTk.PhotoImage(bg_small)
+            self.image_refs.append(photo)
+            row_canvas.create_image(0, 0, anchor="nw", image=photo)
+        
+        # Title (already transparent)
+        self._draw_war_title(row_canvas, war.name)
+        
+        # Calculate war statistics
+        stats = WarAnalyzer.calculate_war_statistics(war)
+        
+        # Calculate total army size for both sides
+        total_attacker_army = 0
+        total_defender_army = 0
+        
+        for battle in war.battles:
+            attacker_units = battle.attacker.get('units', {})
+            defender_units = battle.defender.get('units', {})
+            total_attacker_army += sum(attacker_units.values())
+            total_defender_army += sum(defender_units.values())
+        
+        # Format army sizes to be compact
+        def format_army_size(num):
+            if num >= 1000000:
+                return f"{num/1000000:.1f}M"
+            elif num >= 1000:
+                return f"{num/1000:.0f}K"
+            else:
+                return str(num)
+
+        attacker_army_str = format_army_size(total_attacker_army)
+        defender_army_str = format_army_size(total_defender_army)
+
+        # Draw attacker army size (left of war score)
+        attacker_text = f"{attacker_army_str}"
+        attacker_img = Image.new("RGBA", (30, 15), (0, 0, 0, 0))
+        draw_attacker = ImageDraw.Draw(attacker_img)
+
+        try:
+            arial_font = ImageFont.truetype("arial.ttf", 11)
+        except:
+            try:
+                arial_font = ImageFont.truetype("Arial", 11)
+            except:
+                arial_font = ImageFont.load_default()
+
+        # Calculate text width for centering
+        attacker_bbox = arial_font.getbbox(attacker_text)
+        attacker_text_width = attacker_bbox[2] - attacker_bbox[0]
+        attacker_text_height = attacker_bbox[3] - attacker_bbox[1]
+        attacker_text_x = (30 - attacker_text_width) // 2
+        attacker_text_y = (15 - attacker_text_height) // 2
+
+        draw_attacker.text((attacker_text_x, attacker_text_y), attacker_text, font=arial_font, fill=(0, 0, 0, 255))
+        attacker_photo = ImageTk.PhotoImage(attacker_img)
+        self.image_refs.append(attacker_photo)
+        row_canvas.create_image(170, 38, anchor=tk.CENTER, image=attacker_photo)  # Left of war score
+
+        # Draw defender army size (right of war score)
+        defender_text = f"{defender_army_str}"
+        defender_img = Image.new("RGBA", (30, 15), (0, 0, 0, 0))
+        draw_defender = ImageDraw.Draw(defender_img)
+
+        # Calculate text width for centering
+        defender_bbox = arial_font.getbbox(defender_text)
+        defender_text_width = defender_bbox[2] - defender_bbox[0]
+        defender_text_height = defender_bbox[3] - defender_bbox[1]
+        defender_text_x = (30 - defender_text_width) // 2
+        defender_text_y = (15 - defender_text_height) // 2
+
+        draw_defender.text((defender_text_x, defender_text_y), defender_text, font=arial_font, fill=(0, 0, 0, 255))
+        defender_photo = ImageTk.PhotoImage(defender_img)
+        self.image_refs.append(defender_photo)
+        row_canvas.create_image(431, 38, anchor=tk.CENTER, image=defender_photo)  # Right of war score
+        
+        # Draw war score visualization in center (original size with overlay)
+        war_score = stats.war_score_estimate
+        self._draw_mini_war_score(row_canvas, war_score, 300, 40)
+        
+        # Flags - update to use the advanced method
+        self._draw_war_list_flags_advanced(row_canvas, war.attackers, 10, 8, "left", war.original_attacker, flag_overlay)
+        self._draw_war_list_flags_advanced(row_canvas, war.defenders, 590, 8, "right", war.original_defender, flag_overlay)
+        
+        # Draw CB icon - RESTORE ORIGINAL SIZE
+        if war.goals and self.gui:
+            first_goal = war.goals[0]
+            cb_name = first_goal.casus_belli
+            
+            if cb_name:
+                cb_name_for_icon = cb_name.replace('_small', '')
+                cb_icon = self.gui._get_cb_icon(cb_name_for_icon)
+                if cb_icon:
+                    # Ensure proper transparency
+                    if cb_icon.mode != 'RGBA':
+                        cb_icon = cb_icon.convert('RGBA')
+                    
+                    # RESTORE ORIGINAL SIZE (24x24) for war list too
+                    cb_icon = cb_icon.resize((24, 24), Image.Resampling.LANCZOS)
+                    
+                    photo_icon = ImageTk.PhotoImage(cb_icon)
+                    self.image_refs.append(photo_icon)
+                    
+                    # Position below the first attacker flag
+                    row_canvas.create_image(19, 40, anchor=tk.CENTER, image=photo_icon)
+        
+        def on_click(e):
+            self.state.selected_war_index = index
+            self.on_war_select("Tab3")
+        
+        row.bind("<Button-1>", on_click)
+        row_canvas.bind("<Button-1>", on_click)
+
+    def _draw_mini_war_score(self, canvas, war_score: float, x: int, y: int):
+        """Draw a mini war score visualization for the war list with original size and overlay."""
+        # War score is already -100 to +100, no normalization needed
+        
+        # Load overlay and progress bars at original size
+        overlay_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_progress_overlay.dds"))
+        progress1_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_progress1.dds"))
+        progress2_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_progress2.dds"))
+        
+        overlay = SafeLoader.safe_load_image(overlay_path, size=(224, 24))
+        progress1 = SafeLoader.safe_load_image(progress1_path, size=(216, 16))
+        progress2 = SafeLoader.safe_load_image(progress2_path, size=(216, 16))
+        
+        if overlay and progress1 and progress2:
+            # Create composite image with original size
+            composite = Image.new("RGBA", (224, 24), (0, 0, 0, 0))
+            
+            # Position progress bars
+            progress_x = 4
+            progress_y = 4
+            
+            # ALWAYS draw defender progress bar (progress2) at full width
+            composite.paste(progress2, (progress_x, progress_y))
+            
+            # Convert war score (-100 to +100) to percentage of progress1 to show (0% to 100%)
+            progress1_percentage = (war_score + 100) / 200.0  # Convert to 0.0 to 1.0
+            
+            # Calculate crop amount: 0% progress1 = full crop (216px), 100% progress1 = no crop (0px)
+            crop_amount = int(216 * (1.0 - progress1_percentage))
+            crop_amount = max(0, min(216, crop_amount))
+            
+            if crop_amount < 216:
+                progress1_cropped = progress1.crop((0, 0, 216 - crop_amount, 16))
+                composite.paste(progress1_cropped, (progress_x, progress_y))
+            
+            # Add the overlay on top
+            composite.alpha_composite(overlay)
+            
+            # Add percentage text in the middle
+            draw = ImageDraw.Draw(composite)
+            
+            # Show whole numbers without decimals
+            if war_score > 0:
+                percentage_text = f"{int(war_score)}%"
+            elif war_score < 0:
+                percentage_text = f"{int(war_score)}%"
+            else:
+                percentage_text = "0%"
+            
+            try:
+                font = ImageFont.truetype(DEFAULT_FONT_PATH, 14)
+            except:
+                font = ImageFont.load_default()
+            
+            # Center text in 224px width
+            bbox = font.getbbox(percentage_text)
+            text_width = bbox[2] - bbox[0]
+            text_x = (224 - text_width) // 2
+            text_y = 5
+            
+            draw.text((text_x, text_y), percentage_text, font=font, fill=(0, 0, 0, 255))
+            
+            photo = ImageTk.PhotoImage(composite)
+            self.image_refs.append(photo)
+            
+            # Position the war score visualization in center
+            canvas.create_image(x, y, anchor=tk.CENTER, image=photo)
+
+    def _draw_war_title(self, canvas, title: str):
+        """Draw war title on canvas - shortened to make room for stats."""
+        # Shorten title if too long to fit with new stats
+        if len(title) > 50:
+            display_title = title[:48] + "..."
+        else:
+            display_title = title
+        
+        title_strip = Image.new("RGBA", (400, 28), (0, 0, 0, 0))  # Reduced width
+        draw = ImageDraw.Draw(title_strip)
+        bbox = self.font_manager.font_16.getbbox(display_title)
+        text_width = bbox[2] - bbox[0]
+        text_x = max(0, (400 - text_width) // 2)
+        text_y = 10
+        
+        draw.text((text_x, text_y), display_title, font=self.font_manager.font_16, fill=(255, 255, 255, 255))
+        draw.text((text_x + 1, text_y), display_title, font=self.font_manager.font_16, fill=(255, 255, 255, 255))
+        
+        photo = ImageTk.PhotoImage(title_strip)
+        self.image_refs.append(photo)
+        canvas.create_image(100, 0, anchor="nw", image=photo)  # Positioned more to the left
+
+    def _draw_war_list_flags(self, canvas, tags: List[str], x_anchor: int, y: int, side: str, highlight: Optional[str], flag_overlay: Optional[Image.Image]):
+        """Draw flags for war list with maximum width constraint."""
+        tags = [t for t in tags if t and t != "---"]
+        if not tags:
+            return
+        
+        ordered = list(tags)
+        if highlight in ordered:
+            ordered.remove(highlight)
+            ordered.insert(0, highlight)
+        
+        # Maximum width for the flag row (similar to war detail tab)
+        max_total_width = 120  # Adjust this value as needed
+        
+        num_tags = len(ordered)
+        if num_tags <= 5:
+            step = 25
+        elif num_tags <= 8:
+            step = 8
+        else:
+            step = 4
+        
+        # Calculate total width needed
+        total_width_needed = (num_tags - 1) * step + FLAG_WIDTH
+        
+        # If total width exceeds maximum, reduce spacing
+        if total_width_needed > max_total_width:
+            # Calculate new step to fit within max width
+            step = (max_total_width - FLAG_WIDTH) / (num_tags - 1)
+            step = max(8, step)  # Minimum spacing of 8 pixels
+        
+        total_width = (num_tags - 1) * step + FLAG_WIDTH
+        x_start = x_anchor if side == "left" else (x_anchor - total_width)
+        
+        positions = [(tag, x_start + i * step, y) for i, tag in enumerate(ordered)]
+        
+        # Draw all flags except highlighted one first
+        for tag, x, yy in [p for p in positions if p[0] != highlight]:
+            self._draw_single_war_list_flag(canvas, tag, x, yy, flag_overlay)
+        
+        # Draw highlighted flag last (so it appears on top)
+        if highlight and any(tag == highlight for tag, _, _ in positions):
+            tag, x, yy = next(p for p in positions if p[0] == highlight)
+            self._draw_single_war_list_flag(canvas, tag, x, yy, flag_overlay)
+
+    def _draw_war_list_flags_advanced(self, canvas, tags: List[str], x_anchor: int, y: int, side: str, highlight: Optional[str], flag_overlay: Optional[Image.Image]):
+        """Draw flags for war list with maximum width and dynamic spacing, with proper z-order."""
+        tags = [t for t in tags if t and t != "---"]
+        if not tags:
+            return
+        
+        ordered = list(tags)
+        if highlight in ordered:
+            ordered.remove(highlight)
+            ordered.insert(0, highlight)
+        
+        # Configuration
+        max_total_width = 120
+        min_spacing = 4
+        max_spacing = 25
+        preferred_spacing = 25
+        
+        num_tags = len(ordered)
+        
+        # Calculate optimal spacing
+        if num_tags == 1:
+            actual_spacing = 0
+        else:
+            total_width_needed = num_tags * preferred_spacing
+            if total_width_needed <= max_total_width:
+                actual_spacing = preferred_spacing
+            else:
+                actual_spacing = (max_total_width - FLAG_WIDTH) / (num_tags - 1)
+                actual_spacing = max(min_spacing, min(max_spacing, actual_spacing))
+        
+        total_width = (num_tags - 1) * actual_spacing + FLAG_WIDTH
+        x_start = x_anchor if side == "left" else (x_anchor - total_width)
+        
+        positions = [(tag, x_start + i * actual_spacing, y) for i, tag in enumerate(ordered)]
+        
+        # REVERSED: Draw from right to left so leftmost flags appear on top
+        # First draw all non-highlighted flags from right to left
+        non_highlighted = [p for p in positions if p[0] != highlight]
+        for tag, x, yy in reversed(non_highlighted):  # REVERSED iteration
+            self._draw_single_war_list_flag(canvas, tag, x, yy, flag_overlay)
+        
+        # Draw highlighted flag last (so it appears on top of everything)
+        if highlight and any(tag == highlight for tag, _, _ in positions):
+            tag, x, yy = next(p for p in positions if p[0] == highlight)
+            self._draw_single_war_list_flag(canvas, tag, x, yy, flag_overlay)
+
+    def _draw_single_war_list_flag(self, canvas, tag: str, x: int, y: int, overlay: Optional[Image.Image]):
+        """Draw a single country flag with transparent background in war list."""
+        flag = self._load_flag(tag)
+        if not flag:
+            return
+        
+        flag = flag.resize((FLAG_WIDTH, FLAG_HEIGHT), Image.Resampling.LANCZOS)
+        
+        # Create composite with transparent background
+        composite = Image.new("RGBA", (FLAG_WIDTH, FLAG_HEIGHT), (0, 0, 0, 0))
+        composite.paste(flag, (0, 0))
+        
+        if overlay:
+            composite.alpha_composite(overlay)
+        
+        photo = ImageTk.PhotoImage(composite)
+        self.image_refs.append(photo)
+        canvas.create_image(x, y, anchor="nw", image=photo)
+    
+    def _draw_flags(self, canvas, tags: List[str], x_anchor: int, y: int, side: str, highlight: Optional[str], flag_overlay: Optional[Image.Image]):
+        """Draw flags for a list of country tags."""
+        tags = [t for t in tags if t and t != "---"]
+        if not tags:
+            return
+        
+        ordered = list(tags)
+        if highlight in ordered:
+            ordered.remove(highlight)
+            ordered.insert(0, highlight)
+        
+        num_tags = len(ordered)
+        if num_tags <= 5:
+            step = 24
+        elif num_tags <= 9:
+            step = 14
+        else:
+            step = 12
+        
+        total_width = (num_tags - 1) * step + FLAG_WIDTH
+        x_start = x_anchor if side == "left" else (x_anchor - total_width)
+        
+        positions = [(tag, x_start + i * step, y) for i, tag in enumerate(ordered)]
+        
+        for tag, x, yy in [p for p in positions if p[0] != highlight]:
+            self._draw_single_flag(canvas, tag, x, yy, flag_overlay)
+        
+        if highlight and any(tag == highlight for tag, _, _ in positions):
+            tag, x, yy = next(p for p in positions if p[0] == highlight)
+            self._draw_single_flag(canvas, tag, x, yy, flag_overlay)
+    
+    def _draw_single_flag(self, canvas, tag: str, x: int, y: int, overlay: Optional[Image.Image]):
+        """Draw a single country flag."""
+        flag = self._load_flag(tag)
+        if not flag:
+            return
+        
+        flag = flag.resize((FLAG_WIDTH, FLAG_HEIGHT), Image.Resampling.LANCZOS)
+        
+        if overlay:
+            flag = flag.copy()
+            flag.alpha_composite(overlay)
+        
+        photo = ImageTk.PhotoImage(flag)
+        self.image_refs.append(photo)
+        canvas.create_image(x, y, anchor="nw", image=photo)
+    
+    def _load_flag(self, tag: str) -> Optional[Image.Image]:
+        """Load flag image for a country tag."""
+        if not tag or tag == "---":
+            return None
+        
+        cache_key = f"flag_{tag}"
+        cached_flag = self.state.image_cache.get(cache_key)
+        if cached_flag:
+            return cached_flag
+        
+        gov_name = self.state.country_governments.get(tag)
+        if gov_name:
+            flag_type = self.state.gov_to_flagtype.get(gov_name)
+            if flag_type:
+                variant_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}_{flag_type}.tga"))
+                flag = SafeLoader.safe_load_image(variant_path)
+                if flag:
+                    self.state.image_cache.set(cache_key, flag)
+                    return flag
+        
+        base_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}.tga"))
+        flag = SafeLoader.safe_load_image(base_path)
+        if flag:
+            self.state.image_cache.set(cache_key, flag)
+        return flag
+
+
+class CountryFilter:
+    """Renders the country filter list."""
+    
+    def __init__(self, parent_canvas, root, state, scrollbar_assets, image_refs, on_filter_change, gui):
+        self.parent_canvas = parent_canvas
+        self.root = root
+        self.state = state
+        self.sb_assets = scrollbar_assets
+        self.image_refs = image_refs
+        self.on_filter_change = on_filter_change
+        self.gui = gui
+        
+        self.selected_bg = self._load_selected_background()
+        self.unselected_bg = self._load_unselected_background()
+    
+    def _load_selected_background(self) -> Optional[Image.Image]:
+        """Load background for SELECTED countries."""
+        btn_bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_countrybutton.dds"))
+        full_img = SafeLoader.safe_load_image(btn_bg_path)
+        if not full_img:
+            return None
+        
+        crop_width = 620
+        if full_img.width >= crop_width:
+            row_bg = ImageLoader.crop(full_img, left=full_img.width - crop_width)
+        else:
+            row_bg = full_img
+        
+        return row_bg.resize((crop_width, 24), Image.Resampling.NEAREST)
+    
+    def _load_unselected_background(self) -> Optional[Image.Image]:
+        """Load background for UNSELECTED countries."""
+        btn_bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_countrybutton.dds"))
+        full_img = SafeLoader.safe_load_image(btn_bg_path)
+        if not full_img:
+            return None
+        
+        crop_width = 620
+        if full_img.width >= crop_width:
+            row_bg = ImageLoader.crop(full_img, right=full_img.width - crop_width)
+        else:
+            row_bg = full_img
+        
+        return row_bg.resize((crop_width, 24), Image.Resampling.NEAREST)
+    
+    def create(self):
+        """Create the country filter list."""
+        scrollable = ScrollableList(self.parent_canvas, self.root, self.state, FILTER_LIST_X, FILTER_LIST_Y, 
+                                   FILTER_LIST_WIDTH, FILTER_LIST_HEIGHT, self.sb_assets, row_height=24)
+        scrollable.create()
+        
+        btn_bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_countrybutton.dds"))
+        row_bg = self._load_row_background(btn_bg_path)
+        
+        overlay_path = self.state.get_modded_path(os.path.join("gfx", "interface", "flag_overlay_new.tga"))
+        flag_overlay = SafeLoader.safe_load_image(overlay_path, size=(FLAG_WIDTH, FLAG_HEIGHT))
+        
+        all_tags = self._get_all_countries()
+        
+        for tag in all_tags:
+            self._draw_country_row(scrollable.frame_inside, tag, row_bg, flag_overlay)
+    
+    def _load_row_background(self, path: str) -> Optional[Image.Image]:
+        """Load and crop row background image."""
+        full_img = SafeLoader.safe_load_image(path)
+        if not full_img:
+            return None
+        
+        crop_width = 620
+        if full_img.width >= crop_width:
+            row_bg = ImageLoader.crop(full_img, left=full_img.width - crop_width)
+        else:
+            row_bg = full_img
+        
+        return row_bg.resize((crop_width, 24), Image.Resampling.NEAREST)
+    
+    def _get_all_countries(self) -> List[str]:
+        """Get all unique country tags from wars."""
+        tags = set()
+        for war in self.state.wars_data:
+            tags.update(war.attackers)
+            tags.update(war.defenders)
+        return sorted([t for t in tags if t and t != "---"])
+    
+    def _draw_country_row(self, parent, tag: str, row_bg: Optional[Image.Image], flag_overlay: Optional[Image.Image]):
+        """Draw a single country filter row with transparent background."""
+        row = tk.Frame(parent, bg=BG_COLOR, height=24)
+        row.pack(fill="x", pady=0)
+        
+        row_canvas = tk.Canvas(row, width=FILTER_LIST_WIDTH - SCROLLBAR_WIDTH - 4, height=24, 
+                            highlightthickness=0, bg=BG_COLOR)
+        row_canvas.pack(side="left", anchor="w")
+        
+        # Background - make transparent if we have row_bg
+        if self.is_country_selected(tag):
+            if self.selected_bg:
+                # Convert to transparent
+                bg_img = self.selected_bg.copy()
+                if bg_img.mode != 'RGBA':
+                    bg_img = bg_img.convert('RGBA')
+                photo = ImageTk.PhotoImage(bg_img)
+                self.image_refs.append(photo)
+                row_canvas.create_image(0, 0, anchor="nw", image=photo)
+        else:
+            if self.unselected_bg:
+                # Convert to transparent
+                bg_img = self.unselected_bg.copy()
+                if bg_img.mode != 'RGBA':
+                    bg_img = bg_img.convert('RGBA')
+                photo = ImageTk.PhotoImage(bg_img)
+                self.image_refs.append(photo)
+                row_canvas.create_image(0, 0, anchor="nw", image=photo)
+        
+        # Flag with overlay
+        flag_x = 3
+        flag_y = 3
+        
+        flag = self._load_flag(tag)
+        if flag:
+            flag = flag.resize((FLAG_WIDTH, FLAG_HEIGHT), Image.Resampling.LANCZOS)
+            
+            if flag_overlay:
+                flag = flag.copy()
+                flag.alpha_composite(flag_overlay)
+            
+            photo_flag = ImageTk.PhotoImage(flag)
+            self.image_refs.append(photo_flag)
+            row_canvas.create_image(flag_x, flag_y, anchor="nw", image=photo_flag)
+        
+        # Country name
+        text_x = flag_x + FLAG_WIDTH + 3
+        text_y = 12
+
+        government = self.state.country_governments.get(tag)
+        country_name = LocalizationParser.get_country_name(self.state, tag, government)
+
+        if len(country_name) > 21:
+            display_text = country_name[:19] + "..."
+        else:
+            display_text = country_name
+
+        row_canvas.create_text(text_x, text_y, text=display_text, anchor="w", font=("Arial", 9, "bold"))
+        
+        # Click handler
+        def on_click(event):
+            if tag in self.state.selected_countries:
+                self.state.selected_countries.remove(tag)
+            else:
+                self.state.selected_countries.add(tag)
+            
+            # Update filtered wars and refresh display to update war count
+            self.on_filter_change()  # This calls _rebuild_and_refresh()
+            # The war count will update when Tab2 is redrawn
+        
+        row_canvas.bind("<Button-1>", on_click)
+    
+    def is_country_selected(self, tag: str) -> bool:
+        """Check if a country is selected in the filter."""
+        return tag in self.state.selected_countries
+    
+    def _load_flag(self, tag: str) -> Optional[Image.Image]:
+        """Load flag image for a country tag."""
+        if not tag or tag == "---":
+            return None
+        
+        cache_key = f"flag_{tag}"
+        cached_flag = self.state.image_cache.get(cache_key)
+        if cached_flag:
+            return cached_flag
+        
+        gov_name = self.state.country_governments.get(tag)
+        if gov_name:
+            flag_type = self.state.gov_to_flagtype.get(gov_name)
+            if flag_type:
+                variant_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}_{flag_type}.tga"))
+                flag = SafeLoader.safe_load_image(variant_path)
+                if flag:
+                    self.state.image_cache.set(cache_key, flag)
+                    return flag
+        
+        base_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}.tga"))
+        flag = SafeLoader.safe_load_image(base_path)
+        if flag:
+            self.state.image_cache.set(cache_key, flag)
+        return flag
+
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+def main():
+    """Main entry point for the application."""
+    app = tk.Tk()
+    app.withdraw()
+    
+    messagebox.showinfo("Select Victoria 2 Folder", "Please select your Victoria 2 installation folder.")
+    
+    initial_path = filedialog.askdirectory(title="Select Victoria 2 Folder")
+    if not initial_path:
+        messagebox.showerror("Error", "No folder selected. Exiting.")
+        app.destroy()
+        return
+    
+    state = AppState(vic2_path=initial_path, mod_name="None")
+    gui = WarAnalyzerGUI(state)
+    
+    try:
+        app.mainloop()
+    except Exception as e:
+        messagebox.showerror("Fatal Error", f"The application encountered an error:\n{e}")
+    finally:
+        # Force cleanup
+        try:
+            if 'gui' in locals():
+                gui.cleanup()
+        except:
+            pass
+        try:
+            app.destroy()
+        except:
+            pass
+        # Force exit to ensure process ends
+        import os
+        os._exit(0)
+
+
+if __name__ == "__main__":
+    main()
