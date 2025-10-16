@@ -2671,7 +2671,7 @@ class WarAnalyzerGUI:
             if os.path.exists(file_path):
                 filename = os.path.basename(file_path)
                 btn = tk.Label(self.root, text=f"{i+1}. {filename}", 
-                            cursor="hand2", bg=BG_COLOR, fg="blue")
+                            cursor="hand2", bg=BG_COLOR, fg="blue", font=("Arial", 10))
                 btn.bind("<Button-1>", lambda e, path=file_path: self._load_recent_file(path))
                 self.canvas.create_window(30, recent_y, anchor=tk.NW, window=btn)
                 self.recent_file_buttons.append(btn)
@@ -5481,18 +5481,22 @@ class WarAnalyzerGUI:
             )
             if file_path:
                 self.state.save_file_path = file_path
-                self.save_label.config(text=self.state.save_file_path)
+                filename = os.path.basename(file_path)
+                folder1 = os.path.basename(os.path.dirname(file_path))  # Immediate parent
+                folder2 = os.path.basename(os.path.dirname(os.path.dirname(file_path)))  # Grandparent
+                display_name = f"{folder2}/{folder1}/{filename}"
+                self.save_label.config(text=display_name)
                 
-                # Add to recent files (avoid duplicates)
+                # Add to recent files
                 if file_path in self.state.config.recent_files:
                     self.state.config.recent_files.remove(file_path)
                 self.state.config.recent_files.insert(0, file_path)
-                self.state.config.recent_files = self.state.config.recent_files[:5]
+                self.state.config.recent_files = self.state.config.recent_files[:10]
                 self.state.config.save()
                 
                 # Refresh recent files display
                 self._refresh_recent_files()
-        
+
         save_btn = self._create_button("Select Save File", choose_save)
         self.canvas.create_window(30, 140, anchor=tk.NW, window=save_btn)
         
@@ -5515,7 +5519,7 @@ class WarAnalyzerGUI:
             if os.path.exists(file_path):
                 filename = os.path.basename(file_path)
                 btn = tk.Label(self.root, text=f"{i+1}. {filename}", 
-                            cursor="hand2", bg=BG_COLOR, font=("Arial", 9), fg="blue")
+                            cursor="hand2", bg=BG_COLOR, font=("Arial", 10), fg="blue")
                 btn.bind("<Button-1>", lambda e, path=file_path: self._load_recent_file(path))
                 self.canvas.create_window(30, recent_y, anchor=tk.NW, window=btn)
                 self.recent_file_buttons.append(btn)
@@ -5872,11 +5876,8 @@ class WarList:
         bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_entrybg.dds"))
         entry_bg = SafeLoader.safe_load_image(bg_path)
         
-        # Limit the number of wars rendered at once if needed
-        max_wars_to_render = 50  # Adjust as needed
-        wars_to_render = wars[:max_wars_to_render] if len(wars) > max_wars_to_render else wars
-        
-        for idx, war in enumerate(wars_to_render):
+        # REMOVE THE LIMIT - render all wars
+        for idx, war in enumerate(wars):
             self._draw_war_row(scrollable.frame_inside, war, idx, flag_overlay, entry_bg)
 
     def _determine_background_crop(self, war: War) -> str:
