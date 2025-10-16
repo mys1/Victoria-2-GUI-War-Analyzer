@@ -55,9 +55,6 @@ FLAG_HEIGHT = 17
 # UI Colors
 BG_COLOR = "#e0ded5"
 
-# Font path
-DEFAULT_FONT_PATH = r"C:\Users\Christian\Downloads\Garamond Premier Pro Regular\Garamond Premier Pro Regular.ttf"
-
 # ============================================================================
 # DATA CLASSES
 # ============================================================================
@@ -261,6 +258,347 @@ class AppState:
                 return str(base_path)
         
         return relative_path
+
+@dataclass
+class FontChar:
+    id: int
+    x: int
+    y: int
+    width: int
+    height: int
+    xoffset: int
+    yoffset: int
+    xadvance: int
+    page: int
+
+class CleanBMFont:
+    def __init__(self):
+        self.reset_font()
+        
+    def reset_font(self):
+        """Reset all font data to initial state"""
+        self.chars: Dict[int, FontChar] = {}
+        self.common = {}
+        self.pages: List[Image.Image] = []
+        self.kernings: Dict[Tuple[int, int], int] = {}
+        self._color = (255, 255, 255)
+        
+    def load_font(self, fnt_path: str) -> bool:
+        """Load font from .fnt file with proper baseline alignment"""
+        try:
+            # RESET before loading new font
+            self.reset_font()
+            
+            with open(fnt_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+            
+            # Parse the font file
+            self._parse_font_file_complete(content, fnt_path)
+            
+            return True
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _parse_font_file_complete(self, content: str, fnt_path: str):
+        """Parse the complete font file"""
+        lines = content.split('\n')
+        base_dir = os.path.dirname(fnt_path)
+        
+        # Find page definitions
+        page_files = {}
+        for line in lines:
+            line = line.strip()
+            if line.startswith('page'):
+                parts = line.split()
+                page_id = None
+                file_name = None
+                
+                for part in parts[1:]:
+                    if part.startswith('id='):
+                        page_id = int(part.split('=')[1])
+                    elif part.startswith('file='):
+                        file_name = part.split('=')[1]
+                        if file_name.startswith('"') and file_name.endswith('"'):
+                            file_name = file_name[1:-1]
+                
+                if page_id is not None and file_name is not None:
+                    page_files[page_id] = file_name
+        
+        # Guess texture if needed
+        if not page_files:
+            fnt_name = os.path.splitext(os.path.basename(fnt_path))[0]
+            guessed_files = [
+                f"{fnt_name}_0.tga", f"{fnt_name}_0.png", f"{fnt_name}.tga", f"{fnt_name}.png",
+            ]
+            
+            for guessed_file in guessed_files:
+                test_path = os.path.join(base_dir, guessed_file)
+                if os.path.exists(test_path):
+                    page_files[0] = guessed_file
+                    break
+        
+        # Load textures
+        for page_id, file_name in page_files.items():
+            texture_path = os.path.join(base_dir, file_name)
+            if os.path.exists(texture_path):
+                self.pages.append(Image.open(texture_path).convert('RGBA'))
+            else:
+                scaleW = int(self.common.get('scaleW', 256))
+                scaleH = int(self.common.get('scaleH', 256))
+                placeholder = Image.new('RGBA', (scaleW, scaleH), (50, 50, 50, 255))
+                self.pages.append(placeholder)
+        
+        # Parse other data
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            try:
+                if line.startswith('info'):
+                    self._parse_key_value_line(line, 'info')
+                elif line.startswith('common'):
+                    self._parse_key_value_line(line, 'common')
+                elif line.startswith('char'):
+                    self._parse_char_line(line)
+                elif line.startswith('kerning'):
+                    self._parse_kerning_line(line)
+            except Exception as e:
+                continue
+    
+    def _parse_key_value_line(self, line: str, line_type: str):
+        """Parse info and common lines"""
+        pairs = self._extract_key_value_pairs(line)
+        if line_type == 'common':
+            self.common = pairs
+    
+    def _parse_char_line(self, line: str):
+        """Parse character line"""
+        pairs = self._extract_key_value_pairs(line)
+        
+        if 'id' not in pairs:
+            return
+            
+        try:
+            char_id = int(pairs['id'])
+            self.chars[char_id] = FontChar(
+                id=char_id,
+                x=int(pairs.get('x', 0)),
+                y=int(pairs.get('y', 0)),
+                width=int(pairs.get('width', 0)),
+                height=int(pairs.get('height', 0)),
+                xoffset=int(pairs.get('xoffset', 0)),
+                yoffset=int(pairs.get('yoffset', 0)),
+                xadvance=int(pairs.get('xadvance', 0)),
+                page=int(pairs.get('page', 0))
+            )
+        except:
+            pass
+    
+    def _parse_kerning_line(self, line: str):
+        """Parse kerning line"""
+        pairs = self._extract_key_value_pairs(line)
+        
+        try:
+            first = int(pairs.get('first', 0))
+            second = int(pairs.get('second', 0))
+            amount = int(pairs.get('amount', 0))
+            
+            if first and second:
+                self.kernings[(first, second)] = amount
+        except:
+            pass
+    
+    def _extract_key_value_pairs(self, line: str) -> Dict[str, str]:
+        """Extract key=value pairs"""
+        pairs = {}
+        parts = line.split()
+        
+        for part in parts[1:]:
+            if '=' in part:
+                key, value = part.split('=', 1)
+                if value.startswith('"') and value.endswith('"'):
+                    value = value[1:-1]
+                pairs[key] = value
+        
+        return pairs
+    
+    def get_kerning(self, first: int, second: int) -> int:
+        """Get kerning between two characters"""
+        return self.kernings.get((first, second), 0)
+    
+    def set_color(self, color: Tuple[int, int, int]):
+        """Set text color"""
+        self._color = color
+    
+    def render_text(self, text: str, size: int = 18, color: str = "black", 
+               bold: bool = False, vertical_offset: int = 0) -> Image.Image:
+        """Render text with proper baseline alignment - CLEAN VERSION"""
+        if color is None:
+            color = self._color
+        
+        if not self.common or not self.chars:
+            return self._create_error_image("No font data")
+        
+        # Get font metrics
+        line_height = int(self.common.get('lineHeight', 18))
+        
+        # Calculate size with kerning
+        width, height = self._calculate_text_size_with_kerning(text, line_height)
+        
+        # Create clean image
+        image = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+        
+        x, y = 0, 0
+        prev_char = None
+        
+        for char in text:
+            char_code = ord(char)
+            
+            if char_code not in self.chars:
+                if prev_char is not None:
+                    x += 8
+                prev_char = char_code
+                continue
+            
+            char_info = self.chars[char_code]
+            
+            # Apply kerning
+            if prev_char is not None:
+                kerning = self.get_kerning(prev_char, char_code)
+                x += kerning
+            
+            # Baseline alignment - clean version
+            dest_x = x + char_info.xoffset
+            dest_y = y + char_info.yoffset + vertical_offset
+            
+            # Draw character from texture
+            if (self.pages and char_info.page < len(self.pages) and 
+                char_info.width > 0 and char_info.height > 0):
+                
+                texture = self.pages[char_info.page]
+                if (char_info.x + char_info.width <= texture.width and 
+                    char_info.y + char_info.height <= texture.height):
+                    
+                    char_region = texture.crop((
+                        char_info.x, char_info.y,
+                        char_info.x + char_info.width,
+                        char_info.y + char_info.height
+                    ))
+                    
+                    # Apply color
+                    if char_region.mode != 'RGBA':
+                        char_region = char_region.convert('RGBA')
+
+                    # Convert color name to RGB tuple
+                    if color == "black":
+                        color_rgb = (0, 0, 0)
+                    else:  # Default to white for anything else
+                        color_rgb = (255, 255, 255)
+
+                    colored_char = Image.new('RGBA', char_region.size, (*color_rgb, 0))
+                    alpha = char_region.split()[3]
+                    colored_char.putalpha(alpha)
+
+                    # Clean paste
+                    image.paste(colored_char, (dest_x, dest_y), colored_char)
+            
+            # Advance to next character
+            x += char_info.xadvance
+            prev_char = char_code
+        
+        return image
+    
+    def _calculate_text_size_with_kerning(self, text: str, line_height: int) -> Tuple[int, int]:
+        """Calculate text size including kerning"""
+        width = 0
+        prev_char = None
+        
+        for char in text:
+            char_code = ord(char)
+            
+            if char_code in self.chars:
+                if prev_char is not None:
+                    width += self.get_kerning(prev_char, char_code)
+                
+                width += self.chars[char_code].xadvance
+                prev_char = char_code
+            else:
+                width += 8
+                prev_char = None
+        
+        return (max(100, width), max(50, line_height))
+    
+    def _create_error_image(self, message: str) -> Image.Image:
+        """Create an error image"""
+        img = Image.new('RGB', (400, 100), (255, 200, 200))
+        draw = ImageDraw.Draw(img)
+        draw.text((10, 10), f"ERROR: {message}", fill=(255, 0, 0))
+        return img
+
+class EasyFont:
+    """Simple API for using BMFonts in other programs"""
+    def __init__(self, fnt_path: str = None):
+        self.font = CleanBMFont()
+        if fnt_path:
+            self.load_font(fnt_path)
+    
+    def load_font(self, fnt_path: str) -> bool:
+        """Load a font from .fnt file - automatically resets previous font"""
+        return self.font.load_font(fnt_path)
+    
+    def set_color(self, r: int, g: int, b: int):
+        """Set text color using RGB values (0-255)"""
+        self.font.set_color((r, g, b))
+    
+    def render(self, text: str, color = None) -> Image.Image:
+        """Render text to PIL Image - support color names by converting to RGB"""
+        if color is None:
+            color = "white"
+        
+        # Convert color names to RGB tuples
+        color_map = {
+            "white": (255, 255, 255),
+            "black": (0, 0, 0),
+            "red": (255, 0, 0),
+            "green": (0, 255, 0), 
+            "blue": (0, 0, 255),
+            "yellow": (255, 255, 0),
+        }
+        
+        # If color is a string, convert to RGB tuple
+        if isinstance(color, str):
+            color_rgb = color_map.get(color.lower(), (255, 255, 255))
+        else:
+            # Assume it's already an RGB tuple
+            color_rgb = color
+        
+        # Set the color first
+        self.font.set_color(color_rgb)
+        
+        # Render the text - don't pass color again if render_text doesn't use it
+        text_image = self.font.render_text(text)
+        
+        # Always convert the image to the desired color
+        data = text_image.getdata()
+        new_data = []
+        for item in data:
+            # Use the alpha channel from the original, but replace RGB with our color
+            if item[3] > 0:  # If pixel is not fully transparent
+                new_data.append((color_rgb[0], color_rgb[1], color_rgb[2], item[3]))
+            else:
+                new_data.append(item)
+        text_image.putdata(new_data)
+        
+        return text_image
+    
+    def save_image(self, text: str, filename: str, color: Tuple[int, int, int] = None):
+        """Render text and save to file"""
+        image = self.render(text, color)
+        image.save(filename)
     
 class CustomCheckbox:
     """Custom checkbox using game graphics."""
@@ -1717,198 +2055,199 @@ class ToolTip:
         if tw:
             tw.destroy()
 
-def render_text_image(text, font_path, font_size, color, kerning=0, bold=False):
-    try:
-        font = ImageFont.truetype(font_path, font_size)
-    except:
-        font = ImageFont.load_default()
-    
-    ascent, descent = font.getmetrics()
-    line_height = ascent + descent
-    widths = [(font.getbbox(c)[2] - font.getbbox(c)[0]) if hasattr(font, 'getbbox') else font.getsize(c)[0] for c in text]
-    total_width = sum(widths) + kerning * (len(text) - 1)
-    img = Image.new("RGBA", (total_width, line_height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    x = 0
-    for i, char in enumerate(text):
-        if bold:
-            # Bold effect: draw twice with offset
-            draw.text((x, 0), char, font=font, fill=color)
-            draw.text((x + 1, 0), char, font=font, fill=color)
-        else:
-            draw.text((x, 0), char, font=font, fill=color)
-        x += widths[i] + kerning
-    return img
-
 def get_unit_icon(unit_strip_img, index):
     w = 36
     return unit_strip_img.crop((index * w, 0, (index + 1) * w, 36))
-
-def create_label(canvas, text, font_size, pos, anchor, font_path, kerning=0, bold=False, color=(0, 0, 0, 255), images=None):
-    img = render_text_image(text, font_path, font_size, color, kerning=kerning, bold=bold)
-    photo = ImageTk.PhotoImage(img)
-    canvas.create_image(*pos, anchor=anchor, image=photo)
-    if images is not None:
-        images.append(photo)
-    return photo
-
-# ============================================================================
-# COUNTRY INFO PANEL
-# ============================================================================
-
-class CountryInfoPanel:
-    """Displays detailed information about a selected country."""
-    
-    def __init__(self, canvas, root, state, image_refs, font_manager):
-        self.canvas = canvas
-        self.root = root
-        self.state = state
-        self.image_refs = image_refs
-        self.font_manager = font_manager
-        self.current_country = None
-    
-    def create(self, x: int, y: int):
-        """Create the country info panel at specified position."""
-        self.panel_x = x
-        self.panel_y = y
-        
-        # Panel background
-        bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "decision_window.dds"))
-        bg_img = SafeLoader.safe_load_image(bg_path, size=(300, 400))
-        
-        if bg_img:
-            photo = ImageTk.PhotoImage(bg_img)
-            self.image_refs.append(photo)
-            self.bg_id = self.canvas.create_image(x, y, anchor=tk.NW, image=photo)
-        else:
-            self.bg_id = self.canvas.create_rectangle(x, y, x + 300, y + 400, fill="#f0f0f0", outline="#666")
-        
-        # Country name label
-        self.name_label = tk.Label(self.root, text="Select a Country", font=("Arial", 12, "bold"), bg="#f0f0f0")
-        self.name_id = self.canvas.create_window(x + 150, y + 20, window=self.name_label)
-        
-        # Country flag
-        self.flag_canvas = tk.Canvas(self.root, width=64, height=48, highlightthickness=0, bg="#f0f0f0")
-        self.flag_id = self.canvas.create_window(x + 50, y + 50, window=self.flag_canvas, anchor=tk.NW)
-        
-        # Info labels
-        self.info_labels = {}
-        labels = [
-            ("Government:", "gov_label", y + 50),
-            ("Prestige Rank:", "prestige_label", y + 70),
-            ("Industry Rank:", "industry_label", y + 90),
-            ("Military Rank:", "military_label", y + 110),
-            ("Total Rank:", "total_label", y + 130),
-            ("Sphere Leader:", "sphere_label", y + 150),
-        ]
-        
-        for text, key, label_y in labels:
-            label = tk.Label(self.root, text=text, font=("Arial", 9), bg="#f0f0f0", justify=tk.LEFT)
-            label_id = self.canvas.create_window(x + 120, label_y, window=label, anchor=tk.W)
-            
-            value = tk.Label(self.root, text="", font=("Arial", 9), bg="#f0f0f0", justify=tk.LEFT)
-            value_id = self.canvas.create_window(x + 200, label_y, window=value, anchor=tk.W)
-            
-            self.info_labels[key] = {"label": label, "value": value}
-    
-    def update_country(self, country_tag: str):
-        """Update the panel with information for a specific country."""
-        self.current_country = country_tag
-        
-        if not self.state.save_file_text:
-            self.name_label.config(text="No save file loaded")
-            return
-        
-        # Get country data
-        country_name = LocalizationParser.get_country_name(self.state, country_tag, None)
-        self.name_label.config(text=country_name)
-        
-        # Update flag
-        self._update_flag(country_tag)
-        
-        # Update info labels with ranking data
-        self._update_info_labels(country_tag)
-    
-    def _update_flag(self, country_tag: str):
-        """Update the country flag display."""
-        self.flag_canvas.delete("all")
-        
-        flag = self._load_country_flag(country_tag)
-        if flag:
-            flag = flag.resize((64, 48), Image.Resampling.LANCZOS)
-            photo = ImageTk.PhotoImage(flag)
-            self.image_refs.append(photo)
-            self.flag_canvas.create_image(0, 0, anchor=tk.NW, image=photo)
-        else:
-            self.flag_canvas.create_rectangle(0, 0, 64, 48, fill="gray", outline="black")
-            self.flag_canvas.create_text(32, 24, text=country_tag, font=("Arial", 10, "bold"))
-    
-    def _load_country_flag(self, tag: str) -> Optional[Image.Image]:
-        """Load flag image for a country tag."""
-        if not tag or tag == "---":
-            return None
-        
-        gov_name = self.state.country_governments.get(tag)
-        if gov_name:
-            flag_type = self.state.gov_to_flagtype.get(gov_name)
-            if flag_type:
-                variant_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}_{flag_type}.tga"))
-                flag = SafeLoader.safe_load_image(variant_path)
-                if flag:
-                    return flag
-        
-        base_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}.tga"))
-        return SafeLoader.safe_load_image(base_path)
-    
-    def _update_info_labels(self, country_tag: str):
-        """Update all information labels with country data."""
-        # Get government
-        government = self.state.country_governments.get(country_tag, "Unknown")
-        self.info_labels["gov_label"]["value"].config(text=government)
-    
 
 # ============================================================================
 # UI COMPONENTS
 # ============================================================================
 
+# Remove the absolute paths and use relative paths like your other assets
 class FontManager:
-    """Manages fonts for the application."""
+    """Manages fonts for the application with BMFont support including bold variants."""
     
-    def __init__(self, font_path: Optional[str] = None):
-        self.font_path = font_path or DEFAULT_FONT_PATH
-        self.font_18 = self._load_font(18)
-        self.font_16 = self._load_font(16)
-        self.font_14 = self._load_font(14)
-        self.font_12 = self._load_font(12)
-        self.font_10 = self._load_font(10)
-        self.font_8 = self._load_font(8)
+    def __init__(self, state):
+        self.state = state
         
-        # Tkinter font objects
-        self.tk_font_18 = self._load_tk_font(18)
-        self.tk_font_16 = self._load_tk_font(16)
-        self.tk_font_14 = self._load_tk_font(14)
-        self.tk_font_12 = self._load_tk_font(12)
-        self.tk_font_10 = self._load_tk_font(10)
-        self.tk_font_8 = self._load_tk_font(8)
+        # Define relative paths for BMFont files - only the ones you need
+        self.BMFONT_PATHS = {
+            # Regular fonts
+            10: os.path.join("gfx", "fonts", "Arial10.fnt"),
+            12: os.path.join("gfx", "fonts", "Arial12.fnt"),
+            14: os.path.join("gfx", "fonts", "garamond_14.fnt"),
+            15: os.path.join("gfx", "fonts", "Arial14.fnt"),            
+            16: os.path.join("gfx", "fonts", "garamond_16.fnt"),
+            18: os.path.join("gfx", "fonts", "vic_18.fnt"),
+            22: os.path.join("gfx", "fonts", "vic_22.fnt"),
+            32: os.path.join("gfx", "fonts", "vic_32.fnt"),
+            
+            # Bold variants
+            '12_bold': os.path.join("gfx", "fonts", "Arial12_bold.fnt"),
+            '14_bold': os.path.join("gfx", "fonts", "garamond_14_bold.fnt"),
+            '16_bold': os.path.join("gfx", "fonts", "garamond_16_bold.fnt"),
+            '18_bold': os.path.join("gfx", "fonts", "vic_18_bold.fnt"),
+            '22_bold': os.path.join("gfx", "fonts", "vic_22_bold.fnt"),
+        }
+        
+        # Load fonts
+        self.ttf_fonts = self._load_ttf_fonts()
+        self.bmfonts = {}
+        self._load_bmfonts()
     
-    def _load_font(self, size: int) -> ImageFont.ImageFont:
-        """Load a font of specified size for PIL."""
-        try:
-            if self.font_path and os.path.isfile(self.font_path):
-                return ImageFont.truetype(self.font_path, size)
-        except Exception:
-            pass
-        return ImageFont.load_default()
+    def _load_ttf_fonts(self):
+        """Load TTF fonts for fallback with variants."""
+        fonts = {}
+        # Only the sizes we actually use
+        sizes = [18, 22]
+        
+        for size in sizes:
+            try:
+                # Try to load regular
+                regular_path = os.path.join("gfx", "fonts", f"fallback_{size}.ttf")
+                full_path = self.state.get_modded_path(regular_path)
+                if os.path.exists(full_path):
+                    fonts[size] = ImageFont.truetype(full_path, size)
+                else:
+                    fonts[size] = ImageFont.load_default()
+                
+                # Try bold variant for size 22
+                if size == 22:
+                    bold_path = os.path.join("gfx", "fonts", f"fallback_{size}_bold.ttf")
+                    bold_full_path = self.state.get_modded_path(bold_path)
+                    if os.path.exists(bold_full_path):
+                        fonts[f"{size}_bold"] = ImageFont.truetype(bold_full_path, size)
+                    
+            except:
+                fonts[size] = ImageFont.load_default()
+        
+        return fonts
     
-    def _load_tk_font(self, size: int) -> tuple:
-        """Load a font for tkinter widgets."""
+    def _load_bmfonts(self):
+        """Load BMFonts for the specific sizes we need."""
+        for variant, relative_path in self.BMFONT_PATHS.items():
+            try:
+                full_path = self.state.get_modded_path(relative_path)
+                if os.path.exists(full_path):
+                    bmfont = EasyFont(full_path)
+                    self.bmfonts[variant] = bmfont
+                else:
+                    self.bmfonts[variant] = None
+            except Exception as e:
+                self.bmfonts[variant] = None
+    
+    def render_text(self, text: str, size: int = 18, color = "black", bold: bool = False) -> Image.Image:
         try:
-            if self.font_path and os.path.isfile(self.font_path):
-                # Return a tuple that tkinter can use: (font_family, size, weight)
-                return (self.font_path, size, "normal")
-        except Exception:
-            pass
-        return ("Arial", size, "normal")
+            # Map requested sizes to available font sizes
+            available_sizes = [10, 12, 14, 15, 16, 18, 22, 32]
+            closest_size = min(available_sizes, key=lambda x: abs(x - size))
+            variant_key = closest_size if not bold else f"{closest_size}_bold"
+            
+            if variant_key in self.bmfonts and self.bmfonts[variant_key] is not None:
+                # Convert color
+                if isinstance(color, tuple) and len(color) >= 3:
+                    if color == (255, 255, 255):
+                        easyfont_color = "white"
+                    elif color == (0, 0, 0):
+                        easyfont_color = "black"
+                    else:
+                        easyfont_color = color
+                else:
+                    easyfont_color = color
+
+                result = self.bmfonts[variant_key].render(text, easyfont_color)
+                return result
+            else:
+                return self._render_ttf_text(text, size, color, bold)
+                
+        except Exception as e:
+            # Return a blank image as fallback
+            return Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+    
+    def _render_ttf_text(self, text: str, size: int, color: str, bold: bool = False) -> Image.Image:
+        """Render text using TTF font with variants."""
+        variant_key = size if not bold else f"{size}_bold"
+        font = self.ttf_fonts.get(variant_key, self.ttf_fonts.get(size, self.ttf_fonts[18]))
+        
+        bbox = font.getbbox(text)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        padding = 4
+        image = Image.new('RGBA', (text_width + padding, text_height + padding), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        
+        draw.text((padding//2, padding//2), text, font=font, fill=color)
+        return image
+    
+    def render_text_with_bg(self, text: str, size: int = 18, color: str = "black", 
+                          bg_color: Tuple[int, int, int, int] = None,
+                          bold: bool = False) -> Image.Image:
+        """Render text with background and bold support."""
+        text_image = self.render_text(text, size, color, bold)
+        
+        if bg_color is None:
+            return text_image
+        
+        bg_image = Image.new('RGBA', text_image.size, bg_color)
+        bg_image.paste(text_image, (0, 0), text_image)
+        return bg_image
+    
+    def _color_name_to_rgb(self, color_name: str) -> Tuple[int, int, int]:
+        """Convert color name to RGB tuple - ensure it's always 3 elements."""
+        colors = {
+            "black": (0, 0, 0),
+            "white": (255, 255, 255),
+            "red": (255, 0, 0),
+            "green": (0, 255, 0),
+            "blue": (0, 0, 255),
+            "yellow": (255, 255, 0),
+            "gray": (128, 128, 128),
+            "grey": (128, 128, 128),
+            "gold": (255, 215, 0),
+            "silver": (192, 192, 192),
+            "dark_red": (139, 0, 0),
+            "dark_green": (0, 100, 0),
+            "dark_blue": (0, 0, 139),
+        }
+        rgb = colors.get(color_name.lower(), (0, 0, 0))
+        
+        # Ensure we always return exactly 3 elements
+        if len(rgb) == 3:
+            return rgb
+        elif len(rgb) == 1:
+            return (rgb[0], rgb[0], rgb[0])  # Convert grayscale to RGB
+        else:
+            return (0, 0, 0)  # Fallback
+
+    # Convenience methods
+    def render_bold_text(self, text: str, size: int = 22, color: str = "white") -> Image.Image:
+        """Convenience method for bold text (only works for size 22)."""
+        #if size != 22:
+        #    size = 22
+        return self.render_text(text, size, color, bold=True)
+
+    # Backward compatibility properties - only the ones we need
+    @property
+    def font_18(self):
+        return self.ttf_fonts[18]
+    
+    @property
+    def font_22(self):
+        return self.ttf_fonts[22]
+    
+    # Tkinter font properties - only the ones we need
+    @property
+    def tk_font_18(self):
+        return self.tk_fonts[18]
+    
+    @property
+    def tk_font_22(self):
+        return self.tk_fonts[22]
+    
+    @property
+    def tk_font_22_bold(self):
+        return self.tk_fonts['22_bold']
 
 
 class LayerCache:
@@ -2220,7 +2559,7 @@ class WarAnalyzerGUI:
         self.state.config = AppConfig.load()
         self.canvas = tk.Canvas(self.root, width=WINDOW_WIDTH, height=WINDOW_HEIGHT, highlightthickness=0)
         self.canvas.pack()
-        self.font_manager = FontManager()
+        self.font_manager = FontManager(self.state)
         self.layer_cache = LayerCache(state)
         self.current_tab = "Tab1"
         self.image_refs = []
@@ -2309,7 +2648,7 @@ class WarAnalyzerGUI:
             if os.path.exists(file_path):
                 filename = os.path.basename(file_path)
                 btn = tk.Label(self.root, text=f"{i+1}. {filename}", 
-                            cursor="hand2", bg=BG_COLOR, font=("Arial", 9), fg="blue")
+                            cursor="hand2", bg=BG_COLOR, fg="blue")
                 btn.bind("<Button-1>", lambda e, path=file_path: self._load_recent_file(path))
                 self.canvas.create_window(30, recent_y, anchor=tk.NW, window=btn)
                 self.recent_file_buttons.append(btn)
@@ -2702,52 +3041,25 @@ class WarAnalyzerGUI:
 
     def _draw_war_header_simple(self, war: War, x: int, y: int):
         """Draw simplified war header with defenders on the right side."""
-        # War name - using the same method as WarList but in white, moved UP
-        title_strip = Image.new("RGBA", (638, 28), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(title_strip)
-        bbox = self.font_manager.font_18.getbbox(war.name)
-        text_width = bbox[2] - bbox[0]
-        text_x = max(0, (638 - text_width) // 2)
-        text_y = 0
+        # War name - using FontManager with white text
+        text_image = self.font_manager.render_bold_text(war.name, 22, "white")
         
-        # Draw white text with the custom font - BOLD EFFECT by rendering twice
-        # First pass (base)
-        draw.text((text_x, text_y), war.name, font=self.font_manager.font_18, fill=(255, 255, 255, 255))
-        # Second pass (slight offset for bold effect)
-        draw.text((text_x + 1, text_y), war.name, font=self.font_manager.font_18, fill=(255, 255, 255, 255))
-        
-        photo = ImageTk.PhotoImage(title_strip)
+        photo = ImageTk.PhotoImage(text_image)
         self.image_refs.append(photo)
-        name_id = self.canvas.create_image(x + 319, y - 22, anchor=tk.N, image=photo)
+        
+        # Center the text
+        text_x = x + 319
+        text_y = y - 24
+        
+        name_id = self.canvas.create_image(text_x, text_y, anchor=tk.N, image=photo)
         self._tab3_widgets.append(name_id)
         
         # Load flag overlay for normal flags
         overlay_path = self.state.get_modded_path(os.path.join("gfx", "interface", "flag_overlay_new.tga"))
         flag_overlay = SafeLoader.safe_load_image(overlay_path, size=(FLAG_WIDTH, FLAG_HEIGHT))
         
-        # Draw attackers section on LEFT side - BLACK text
-        attackers_label = tk.Label(
-            self.root,
-            text="Attackers:",
-            font=("Arial", 10, "bold"),
-            bg=BG_COLOR,
-            fg="black"
-        )
-        
-        # Draw attackers flags on LEFT - adjust Y position for larger first flag
-        self._draw_simple_flag_row(war.attackers, war.original_attacker, x - 3, y + 50, flag_overlay, is_attacker=True)
-        
-        # Draw defenders section on RIGHT side - BLACK text
-        defenders_label = tk.Label(
-            self.root,
-            text="Defenders:",
-            font=("Arial", 10, "bold"),
-            bg=BG_COLOR,
-            fg="black"
-        )
-        
-        # Draw defenders flags on RIGHT - adjust Y position for larger first flag
-        self._draw_simple_flag_row(war.defenders, war.original_defender, x + 421, y + 50, flag_overlay, is_attacker=False)
+        self._draw_simple_flag_row(war.attackers, war.original_attacker, x + 3, y + 50, flag_overlay, is_attacker=True)
+        self._draw_simple_flag_row(war.defenders, war.original_defender, x + 427, y + 50, flag_overlay, is_attacker=False)
 
     def _draw_single_secondary_flag(self, x_pos, y_pos, tag, flag_overlay):
         """Draw a single secondary flag at the specified position."""
@@ -2855,30 +3167,22 @@ class WarAnalyzerGUI:
             else:
                 display_name = country_name
 
-            # Create text strip with Garamond font
-            name_strip = Image.new("RGBA", (145, 16), (0, 0, 0, 0))  # Wider to fit longer names
-            draw_name = ImageDraw.Draw(name_strip)
-            
-            # Use Arial Bold font
-            try:
-                arial_font = ImageFont.truetype("arialbd.ttf", 12)
-            except:
-                try:
-                    arial_font = ImageFont.truetype("Arial Bold", 12)
-                except:
-                    arial_font = ImageFont.load_default()
-            
-            # Draw white text
-            draw_name.text((0, 0), display_name, font=arial_font, fill=(255, 255, 255, 255))
-            
-            photo_name = ImageTk.PhotoImage(name_strip)
-            self.image_refs.append(photo_name)
-            
-            # Position text below the flag
-            name_x = flag_x + 55
-            name_y = flag_y + 9
-            name_id = self.canvas.create_image(name_x, name_y, anchor=tk.NW, image=photo_name)
-            self._tab3_widgets.append(name_id)
+            # Render text using BMFont
+            name_img = self.font_manager.render_text(display_name, size=15, color="white")
+            if name_img is not None:
+                # Crop transparent padding for proper positioning
+                bbox = name_img.getbbox()
+                if bbox:
+                    name_img = name_img.crop(bbox)
+                
+                name_photo = ImageTk.PhotoImage(name_img)
+                self.image_refs.append(name_photo)
+                
+                # Position text below the flag
+                name_x = flag_x + 55
+                name_y = flag_y + 12
+                name_id = self.canvas.create_image(name_x, name_y, anchor=tk.NW, image=name_photo)
+                self._tab3_widgets.append(name_id)
 
         # Bind events directly to the flag image
         self.canvas.tag_bind(flag_id, "<Enter>", lambda e, t=first_tag: self._on_any_flag_enter(e, t))
@@ -3200,9 +3504,16 @@ class WarAnalyzerGUI:
             army_y = 12  # Center vertically
             row_canvas.create_image(army_x, army_y, anchor="center", image=photo_army)
         else:
-            # Fallback to "vs" text if icon fails to load
-            row_canvas.create_text(panels_start_x + 78 + 8, 12, text="vs", anchor="center", 
-                                font=("Arial", 8, "bold"), fill="black")
+            # Fallback to "vs" text using BMFont if icon fails to load
+            vs_text_img = self.font_manager.render_text("vs", size=8, color="black", bold=True)
+            if vs_text_img:
+                # Crop transparent padding
+                bbox = vs_text_img.getbbox()
+                if bbox:
+                    vs_text_img = vs_text_img.crop(bbox)
+                vs_text_photo = ImageTk.PhotoImage(vs_text_img)
+                self.image_refs.append(vs_text_photo)
+                row_canvas.create_image(panels_start_x + 78 + 8, 12, anchor="center", image=vs_text_photo)
         
         # Create and draw defender unit panel
         defender_panel_x = panels_start_x + 78 + 24  # Account for army icon width
@@ -3452,7 +3763,7 @@ class WarAnalyzerGUI:
         images_refs = []
         
         # Convert battle data to the format expected by the battle GUI
-        battle_info = self._convert_battle_to_info(battle)
+        #battle_info = self._convert_battle_to_info(battle)
         
         # Background - FIXED: Use proper naval background
         if is_naval_battle:
@@ -3557,29 +3868,48 @@ class WarAnalyzerGUI:
             canvas.create_image(496 + 12 - leader_size[0] // 2, 124, anchor=tk.NW, image=defender_leader_photo)
             images_refs.append(defender_leader_photo)
         
-        # Fonts
-        font_path = DEFAULT_FONT_PATH
-        kerning_value = -1
+        # Leader names - remove first name only if too long, then truncate if still too long
+        def shorten_name(full_name):
+            if len(full_name) > 20:
+                # Try to remove first name (everything before first space)
+                parts = full_name.split(' ', 1)
+                if len(parts) > 1:
+                    last_name = parts[1]
+                    # Truncate last name if it's still too long
+                    return last_name[:18] + "..." if len(last_name) > 20 else last_name
+                else:
+                    # If no space, just truncate
+                    return full_name[:18] + "..."
+            else:
+                return full_name
         
-        # Leader names
-        create_label(canvas, attacker_leader_name, 15, (55, 142), tk.NW,
-                    font_path, kerning=kerning_value, images=images_refs)
-        create_label(canvas, defender_leader_name, 15, (485, 142), tk.NE,
-                    font_path, kerning=kerning_value, images=images_refs)
+        attacker_leader_display = shorten_name(attacker_leader_name)
+        defender_leader_display = shorten_name(defender_leader_name)
         
+        attacker_leader_text = self.font_manager.render_text(attacker_leader_display, size=18, color="black")
+        attacker_leader_photo = ImageTk.PhotoImage(attacker_leader_text)
+        canvas.create_image(55, 140, anchor=tk.NW, image=attacker_leader_photo)
+        images_refs.append(attacker_leader_photo)
+
+        defender_leader_text = self.font_manager.render_text(defender_leader_display, size=18, color="black")
+        defender_leader_photo = ImageTk.PhotoImage(defender_leader_text)
+        canvas.create_image(485, 140, anchor=tk.NE, image=defender_leader_photo)
+        images_refs.append(defender_leader_photo)
+                
         # Battle title
-        title_img = render_text_image(f"Battle of {battle.name}", font_path, 18, (255, 255, 255, 255), kerning=kerning_value)
-        title_photo = ImageTk.PhotoImage(title_img)
-        canvas.create_image(272 - title_img.width // 2, 28 - title_img.height // 2, anchor=tk.NW, image=title_photo)
+        title_text = self.font_manager.render_bold_text(f"Battle of {battle.name}", size=22, color="white")
+        title_photo = ImageTk.PhotoImage(title_text)
+        canvas.create_image(272, 42, anchor=tk.CENTER, image=title_photo)
         images_refs.append(title_photo)
         
-        # Result text
+        # Result text - direct image approach
         result_text = "Attacker Won" if battle.result is True else "Defender Won" if battle.result is False else "Indecisive"
-        result_color = (0, 159, 0, 255)  # Green for victory
-        result_img = render_text_image(result_text, font_path, 20, result_color, kerning=kerning_value)
-        result_photo = ImageTk.PhotoImage(result_img)
-        canvas.create_image(272 - result_img.width // 2, 343 - result_img.height // 2, anchor=tk.NW, image=result_photo)
-        images_refs.append(result_photo)
+        result_text_img = self.font_manager.render_text(result_text, size=32, color=(0, 159, 0))
+        
+        if result_text_img is not None:
+            result_photo = ImageTk.PhotoImage(result_text_img)
+            canvas.create_image(272, 352, anchor=tk.CENTER, image=result_photo)
+            images_refs.append(result_photo)
         
         # Unit Table - DIFFERENT FOR NAVAL BATTLES
         if is_naval_battle:
@@ -3594,9 +3924,6 @@ class WarAnalyzerGUI:
 
     def _draw_naval_unit_table(self, canvas, battle: Battle, unit_analysis: Dict, images_refs: list):
         """Draw naval unit table - Show initial ship types, but only totals for sunk/survivors."""
-        font_path = DEFAULT_FONT_PATH
-        font_path_arial = "arial.ttf"  # Added Arial font for headers
-        
         unit_strip_path = self.state.get_modded_path(os.path.join("gfx", "interface", "unit_strip.dds"))
         unit_strip = SafeLoader.safe_load_image(unit_strip_path)
         
@@ -3635,20 +3962,32 @@ class WarAnalyzerGUI:
             # Attacker column headers (right-aligned)
             for i, (label, x) in enumerate(zip(column_headers, atk_xs)):
                 if label:
-                    img = render_text_image(label, font_path_arial, 11, (0, 0, 0, 255))
-                    photo = ImageTk.PhotoImage(img)
-                    # Use CENTER anchor for consistent positioning regardless of text width
-                    canvas.create_image(x - 29, start_y - 7, anchor=tk.CENTER, image=photo)
-                    images_refs.append(photo)
+                    text_img = self.font_manager.render_text(label, size=12, color="black")
+                    if text_img is not None:
+                        # Crop transparent padding for proper centering
+                        bbox = text_img.getbbox()
+                        if bbox:
+                            text_img = text_img.crop(bbox)
+                        
+                        photo = ImageTk.PhotoImage(text_img)
+                        # Use CENTER anchor for consistent positioning regardless of text width
+                        canvas.create_image(x - 30, start_y - 7, anchor=tk.CENTER, image=photo)
+                        images_refs.append(photo)
             
             # Defender column headers (left-aligned)  
             for i, (label, x) in enumerate(zip(column_headers, def_xs)):
                 if label:
-                    img = render_text_image(label, font_path_arial, 11, (0, 0, 0, 255))
-                    photo = ImageTk.PhotoImage(img)
-                    # Use CENTER anchor for consistent positioning
-                    canvas.create_image(x + 28, start_y - 7, anchor=tk.CENTER, image=photo)
-                    images_refs.append(photo)
+                    text_img = self.font_manager.render_text(label, size=12, color="black")
+                    if text_img is not None:
+                        # Crop transparent padding for proper centering
+                        bbox = text_img.getbbox()
+                        if bbox:
+                            text_img = text_img.crop(bbox)
+                        
+                        photo = ImageTk.PhotoImage(text_img)
+                        # Use CENTER anchor for consistent positioning
+                        canvas.create_image(x + 29, start_y - 7, anchor=tk.CENTER, image=photo)
+                        images_refs.append(photo)
             
             # Ship type rows - ONLY SHOW INITIAL COUNTS
             for i, ship_type in enumerate(naval_unit_order):
@@ -3669,18 +4008,28 @@ class WarAnalyzerGUI:
                     images_refs.append(icon_photo)
                 
                 # Attacker stats - ONLY INITIAL (always show first column, skip others)
-                atk_vals = [atk_initial, "", ""]
-                img = render_text_image(str(atk_vals[0]), font_path, 13, (0, 0, 0, 255))
-                photo = ImageTk.PhotoImage(img)
-                canvas.create_image(atk_xs[0], y + 25, anchor=tk.E, image=photo)
-                images_refs.append(photo)
+                text_img = self.font_manager.render_text(str(atk_initial), size=18, color="black")
+                if text_img is not None:
+                    # ADD THIS: Crop transparent padding for proper anchor positioning
+                    bbox = text_img.getbbox()
+                    if bbox:
+                        text_img = text_img.crop(bbox)
+                    
+                    photo = ImageTk.PhotoImage(text_img)
+                    canvas.create_image(atk_xs[0] - 5, y + 18, anchor=tk.E, image=photo)
+                    images_refs.append(photo)
 
                 # Defender stats - ONLY INITIAL (always show first column, skip others)
-                def_vals = [def_initial, "", ""]
-                img = render_text_image(str(def_vals[0]), font_path, 13, (0, 0, 0, 255))
-                photo = ImageTk.PhotoImage(img)
-                canvas.create_image(def_xs[0], y + 25, anchor=tk.W, image=photo)
-                images_refs.append(photo)
+                text_img = self.font_manager.render_text(str(def_initial), size=18, color="black")
+                if text_img is not None:
+                    # ADD THIS: Crop transparent padding for proper anchor positioning
+                    bbox = text_img.getbbox()
+                    if bbox:
+                        text_img = text_img.crop(bbox)
+                    
+                    photo = ImageTk.PhotoImage(text_img)
+                    canvas.create_image(def_xs[0] + 5, y + 18, anchor=tk.W, image=photo)
+                    images_refs.append(photo)
             
             # Total row - SHOW ALL TOTALS (Initial, Sunk, Survivors)
             total_y = start_y + len(naval_unit_order) * row_spacing + 8
@@ -3692,10 +4041,16 @@ class WarAnalyzerGUI:
                 attacker_survivors
             ]
             for val, x in zip(atk_total_vals, atk_xs):
-                img = render_text_image(str(val), font_path, 15, (0, 0, 0, 255))
-                photo = ImageTk.PhotoImage(img)
-                canvas.create_image(x, total_y + 15, anchor=tk.E, image=photo)
-                images_refs.append(photo)
+                text_img = self.font_manager.render_text(str(val), size=22, color="black")
+                if text_img is not None:
+                    # ADD THIS: Crop transparent padding for proper anchor positioning
+                    bbox = text_img.getbbox()
+                    if bbox:
+                        text_img = text_img.crop(bbox)
+                    
+                    photo = ImageTk.PhotoImage(text_img)
+                    canvas.create_image(x - 3, total_y + 15, anchor=tk.E, image=photo)
+                    images_refs.append(photo)
             
             # Defender totals
             def_total_vals = [
@@ -3704,16 +4059,19 @@ class WarAnalyzerGUI:
                 defender_survivors
             ]
             for val, x in zip(def_total_vals, def_xs):
-                img = render_text_image(str(val), font_path, 15, (0, 0, 0, 255))
-                photo = ImageTk.PhotoImage(img)
-                canvas.create_image(x, total_y + 15, anchor=tk.W, image=photo)
-                images_refs.append(photo)
+                text_img = self.font_manager.render_text(str(val), size=22, color="black")
+                if text_img is not None:
+                    # ADD THIS: Crop transparent padding for proper anchor positioning
+                    bbox = text_img.getbbox()
+                    if bbox:
+                        text_img = text_img.crop(bbox)
+                    
+                    photo = ImageTk.PhotoImage(text_img)
+                    canvas.create_image(x + 3, total_y + 15, anchor=tk.W, image=photo)
+                    images_refs.append(photo)
 
     def _draw_land_unit_table(self, canvas, battle: Battle, unit_analysis: Dict, images_refs: list):
         """Draw land unit table - Show initial unit types, but only totals for casualties/survivors."""
-        font_path = DEFAULT_FONT_PATH
-        font_path_arial = "arial.ttf"  # Fixed typo: was "arial.tff"
-        
         unit_strip_path = self.state.get_modded_path(os.path.join("gfx", "interface", "unit_strip.dds"))
         unit_strip = SafeLoader.safe_load_image(unit_strip_path)
         
@@ -3752,22 +4110,33 @@ class WarAnalyzerGUI:
             # Attacker column headers (right-aligned)
             for i, (label, x) in enumerate(zip(column_headers, atk_xs)):
                 if label:
-                    img = render_text_image(label, font_path_arial, 11, (0, 0, 0, 255))
-                    photo = ImageTk.PhotoImage(img)
-                    # Use CENTER anchor for consistent positioning regardless of text width
-                    canvas.create_image(x - 29, start_y - 7, anchor=tk.CENTER, image=photo)
-                    images_refs.append(photo)
+                    text_img = self.font_manager.render_text(label, size=12, color="black")
+                    if text_img is not None:
+                        # Crop transparent padding for proper centering
+                        bbox = text_img.getbbox()
+                        if bbox:
+                            text_img = text_img.crop(bbox)
+                        
+                        photo = ImageTk.PhotoImage(text_img)
+                        # Use CENTER anchor for consistent positioning regardless of text width
+                        canvas.create_image(x - 30, start_y - 7, anchor=tk.CENTER, image=photo)
+                        images_refs.append(photo)
             
             # Defender column headers (left-aligned)  
             for i, (label, x) in enumerate(zip(column_headers, def_xs)):
                 if label:
-                    img = render_text_image(label, font_path_arial, 11, (0, 0, 0, 255))
-                    photo = ImageTk.PhotoImage(img)
-                    # Use CENTER anchor for consistent positioning
-                    canvas.create_image(x + 28, start_y - 7, anchor=tk.CENTER, image=photo)
-                    images_refs.append(photo)
+                    text_img = self.font_manager.render_text(label, size=12, color="black")
+                    if text_img is not None:
+                        # Crop transparent padding for proper centering
+                        bbox = text_img.getbbox()
+                        if bbox:
+                            text_img = text_img.crop(bbox)
+                        
+                        photo = ImageTk.PhotoImage(text_img)
+                        # Use CENTER anchor for consistent positioning
+                        canvas.create_image(x + 29, start_y - 7, anchor=tk.CENTER, image=photo)
+                        images_refs.append(photo)
             
-            # Rest of your existing code for unit rows and totals...
             # Land unit rows - ONLY SHOW INITIAL COUNTS
             for i, unit_type in enumerate(land_unit_order):
                 y = start_y + i * row_spacing
@@ -3787,18 +4156,28 @@ class WarAnalyzerGUI:
                     images_refs.append(icon_photo)
                 
                 # Attacker stats - ONLY INITIAL
-                atk_vals = [atk_initial, "", ""]
-                img = render_text_image(str(atk_vals[0]), font_path, 13, (0, 0, 0, 255))
-                photo = ImageTk.PhotoImage(img)
-                canvas.create_image(atk_xs[0], y + 25, anchor=tk.E, image=photo)
-                images_refs.append(photo)
+                text_img = self.font_manager.render_text(str(atk_initial), size=18, color="black")
+                if text_img is not None:
+                    # Crop transparent padding for proper anchor positioning
+                    bbox = text_img.getbbox()
+                    if bbox:
+                        text_img = text_img.crop(bbox)
+                    
+                    photo = ImageTk.PhotoImage(text_img)
+                    canvas.create_image(atk_xs[0] - 5, y + 18, anchor=tk.E, image=photo)
+                    images_refs.append(photo)
 
                 # Defender stats - ONLY INITIAL
-                def_vals = [def_initial, "", ""]
-                img = render_text_image(str(def_vals[0]), font_path, 13, (0, 0, 0, 255))
-                photo = ImageTk.PhotoImage(img)
-                canvas.create_image(def_xs[0], y + 25, anchor=tk.W, image=photo)
-                images_refs.append(photo)
+                text_img = self.font_manager.render_text(str(def_initial), size=18, color="black")
+                if text_img is not None:
+                    # Crop transparent padding for proper anchor positioning
+                    bbox = text_img.getbbox()
+                    if bbox:
+                        text_img = text_img.crop(bbox)
+                    
+                    photo = ImageTk.PhotoImage(text_img)
+                    canvas.create_image(def_xs[0] + 5, y + 18, anchor=tk.W, image=photo)
+                    images_refs.append(photo)
             
             # Total row - SHOW ALL TOTALS
             total_y = start_y + len(land_unit_order) * row_spacing + 8
@@ -3810,10 +4189,16 @@ class WarAnalyzerGUI:
                 attacker_survivors
             ]
             for val, x in zip(atk_total_vals, atk_xs):
-                img = render_text_image(str(val), font_path, 15, (0, 0, 0, 255))
-                photo = ImageTk.PhotoImage(img)
-                canvas.create_image(x, total_y + 15, anchor=tk.E, image=photo)
-                images_refs.append(photo)
+                text_img = self.font_manager.render_text(str(val), size=22, color="black")
+                if text_img is not None:
+                    # Crop transparent padding for proper anchor positioning
+                    bbox = text_img.getbbox()
+                    if bbox:
+                        text_img = text_img.crop(bbox)
+                    
+                    photo = ImageTk.PhotoImage(text_img)
+                    canvas.create_image(x - 3, total_y + 15, anchor=tk.E, image=photo)
+                    images_refs.append(photo)
             
             # Defender totals
             def_total_vals = [
@@ -3822,10 +4207,16 @@ class WarAnalyzerGUI:
                 defender_survivors
             ]
             for val, x in zip(def_total_vals, def_xs):
-                img = render_text_image(str(val), font_path, 15, (0, 0, 0, 255))
-                photo = ImageTk.PhotoImage(img)
-                canvas.create_image(x, total_y + 15, anchor=tk.W, image=photo)
-                images_refs.append(photo)
+                text_img = self.font_manager.render_text(str(val), size=22, color="black")
+                if text_img is not None:
+                    # Crop transparent padding for proper anchor positioning
+                    bbox = text_img.getbbox()
+                    if bbox:
+                        text_img = text_img.crop(bbox)
+                    
+                    photo = ImageTk.PhotoImage(text_img)
+                    canvas.create_image(x + 3, total_y + 15, anchor=tk.W, image=photo)
+                    images_refs.append(photo)
 
     def _load_battle_flag(self, country_tag: str, overlay_path: str, rotate_degrees: int = 0) -> Optional[Image.Image]:
         """Load a HIGH-RESOLUTION flag with overlay for battle popup."""
@@ -3977,28 +4368,21 @@ class WarAnalyzerGUI:
 
         return None
 
-    def _draw_war_score_visualization(self, war: War, x: int, y: int):
-        """Draw a visual representation of the war score percentage from -100% to 100%."""
-        # Calculate war statistics
-        stats = WarAnalyzer.calculate_war_statistics(war)
-        war_score = stats.war_score_estimate  # This is already -100 to +100
+    def _draw_war_score(self, canvas, war_score: float, x: int, y: int):
+        """Draw war score visualization for both war list and detailed view."""
+        # War score is already -100 to +100, no normalization needed
         
-        # FIX: No conversion needed - it's already in -100 to +100 range
-        war_score_normalized = war_score  # Direct use, no conversion
-        
-        # UPDATED: Overlay is 224x24 (not 244x24)
+        # Load overlay and progress bars at original size
         overlay_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_progress_overlay.dds"))
-        overlay = SafeLoader.safe_load_image(overlay_path, size=(224, 24))
-        
-        # Load progress bars (both 216x16)
         progress1_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_progress1.dds"))
         progress2_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_progress2.dds"))
         
+        overlay = SafeLoader.safe_load_image(overlay_path, size=(224, 24))
         progress1 = SafeLoader.safe_load_image(progress1_path, size=(216, 16))
         progress2 = SafeLoader.safe_load_image(progress2_path, size=(216, 16))
         
         if overlay and progress1 and progress2:
-            # UPDATED: Create composite image with 224 width
+            # Create composite background image
             composite = Image.new("RGBA", (224, 24), (0, 0, 0, 0))
             
             # Position progress bars
@@ -4008,8 +4392,11 @@ class WarAnalyzerGUI:
             # ALWAYS draw defender progress bar (progress2) at full width
             composite.paste(progress2, (progress_x, progress_y))
             
-            # Calculate how much of progress1 (attacker) to show based on normalized war score
-            crop_amount = int(108 - (war_score_normalized * 1.08))
+            # Convert war score (-100 to +100) to percentage of progress1 to show (0% to 1.0)
+            progress1_percentage = (war_score + 100) / 200.0
+            
+            # Calculate crop amount: 0% progress1 = full crop (216px), 100% progress1 = no crop (0px)
+            crop_amount = int(216 * (1.0 - progress1_percentage))
             crop_amount = max(0, min(216, crop_amount))
             
             if crop_amount < 216:
@@ -4019,43 +4406,34 @@ class WarAnalyzerGUI:
             # Add the overlay on top
             composite.alpha_composite(overlay)
             
-            # Add percentage text in the middle
-            draw = ImageDraw.Draw(composite)
+            # Convert background to PhotoImage and add to canvas
+            bg_photo = ImageTk.PhotoImage(composite)
+            self.image_refs.append(bg_photo)
+            canvas.create_image(x, y, anchor=tk.CENTER, image=bg_photo)
             
-            # UPDATED: Show whole numbers without decimals
-            if stats.total_battles == 0:
-                percentage_text = "0%"
-            elif war_score_normalized > 0:
-                percentage_text = f"{int(war_score_normalized)}%"  # Changed to int()
+            # Add percentage text with BMFont (separate layer)
+            if war_score > 0:
+                percentage_text = f"{int(war_score)}%"
+            elif war_score < 0:
+                percentage_text = f"{int(war_score)}%"
             else:
-                percentage_text = f"{int(war_score_normalized)}%"   # Changed to int()
+                percentage_text = "0%"
             
-            try:
-                if self.font_manager.font_14:
-                    font = self.font_manager.font_14
-                else:
-                    font = ImageFont.truetype(DEFAULT_FONT_PATH, 14)
-            except:
-                font = ImageFont.load_default()
+            # Render text using BMFont
+            text_image = self.font_manager.render_text(percentage_text, size=18, color="black")
             
-            # UPDATED: Center text in 224px width
-            bbox = font.getbbox(percentage_text)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-            text_x = (224 - text_width) // 2
-            text_y = 5
-            
-            draw.text((text_x, text_y), percentage_text, font=font, fill=(0, 0, 0, 255))
-            
-            photo = ImageTk.PhotoImage(composite)
-            self.image_refs.append(photo)
-            
-            # Position 30 pixels below war title, centered
-            viz_x = x + 311
-            viz_y = y - 22 + 40
-            
-            self.canvas.create_image(viz_x, viz_y, anchor=tk.N, image=photo)
-            self._tab3_widgets.append(photo)
+            if text_image is not None:
+                # Crop transparent padding for proper centering
+                bbox = text_image.getbbox()
+                if bbox:
+                    text_image = text_image.crop(bbox)
+                
+                # Convert text to PhotoImage
+                text_photo = ImageTk.PhotoImage(text_image)
+                self.image_refs.append(text_photo)
+                
+                # Add text as separate layer above background (same position)
+                canvas.create_image(x, y, anchor=tk.CENTER, image=text_photo)
 
     def _draw_war_details_tab(self):
         """Draw the war details tab with compact layout."""
@@ -4075,14 +4453,13 @@ class WarAnalyzerGUI:
         # Guard against invalid selection
         if (self.state.selected_war_index is None or 
             self.state.selected_war_index >= len(self.state.filtered_wars)):
-            label = tk.Label(
-                self.root,
-                text="No war selected. Select one in 'Show wars' tab.",
-                bg=BG_COLOR,
-                font=("Arial", 11)
-            )
-            wid = self.canvas.create_window(detail_x, detail_y, anchor=tk.NW, window=label)
-            self._tab3_widgets.append(wid)
+            # Render text using BMFont
+            text_img = self.font_manager.render_text("No war selected. Select one in 'Show wars' tab.", size=12, color="black")
+            if text_img is not None:
+                text_photo = ImageTk.PhotoImage(text_img)
+                self.image_refs.append(text_photo)
+                wid = self.canvas.create_image(detail_x, detail_y, anchor=tk.NW, image=text_photo)
+                self._tab3_widgets.append(wid)
             return
 
         war = self.state.filtered_wars[self.state.selected_war_index]
@@ -4101,7 +4478,7 @@ class WarAnalyzerGUI:
             self._tab3_widgets.append(bg_id)
         
         # War header with flags
-        self._draw_war_header_simple(war, detail_x, detail_y)
+        self._draw_war_header_simple(war, detail_x - 6, detail_y)
         
         # ===== STANDALONE DATE DISPLAY =====
         # Format dates for display
@@ -4109,32 +4486,14 @@ class WarAnalyzerGUI:
         end_date_str = war.end_date if war.end_date else "Ongoing"
         date_info = f"Dates: {start_date_str} to {end_date_str}"
         
-        # Create date using Arial font with black text on transparent background
-        date_strip = Image.new("RGBA", (205, 17), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(date_strip)
-
-        # Use Arial font instead of custom font
-        try:
-            arial_font = ImageFont.truetype("arialbd.ttf", 12)
-        except:
-            try:
-                arial_font = ImageFont.truetype("Arial Bold", 12)
-            except:
-                arial_font = ImageFont.load_default()
-
-        bbox = arial_font.getbbox(date_info)
-        text_width = bbox[2] - bbox[0]
-        text_x = max(0, (205 - text_width) // 2)
-        text_y = 1
-
-        # Draw black text with Arial font
-        draw.text((text_x, text_y), date_info, font=arial_font, fill=(0, 0, 0, 255))
-
-        photo = ImageTk.PhotoImage(date_strip)
-        self.image_refs.append(photo)
-        date_y_position = detail_y + 50
-        date_id = self.canvas.create_image(detail_x + 312, date_y_position, anchor=tk.N, image=photo)
-        self._tab3_widgets.append(date_id)
+        # Render date using BMFont
+        date_img = self.font_manager.render_text(date_info, size=15, color="black")
+        if date_img is not None:
+            date_photo = ImageTk.PhotoImage(date_img)
+            self.image_refs.append(date_photo)
+            date_y_position = detail_y + 50
+            date_id = self.canvas.create_image(detail_x + 312, date_y_position, anchor=tk.N, image=date_photo)
+            self._tab3_widgets.append(date_id)
 
         # ===== MILITARY STATISTICS GRAPHICS =====
         stats_y_position = detail_y + 86  # Position below the date
@@ -4146,14 +4505,33 @@ class WarAnalyzerGUI:
         # Load icons
         army_icon_path = self.state.get_modded_path(os.path.join("gfx", "interface", "topbar_army.dds"))
         navy_icon_path = self.state.get_modded_path(os.path.join("gfx", "interface", "topbar_navy.dds"))
+        casualties_icon_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_we_icon.dds"))
 
         army_icon = SafeLoader.safe_load_image(army_icon_path, size=(32, 32))
         navy_icon = SafeLoader.safe_load_image(navy_icon_path, size=(32, 32))
+        casualties_icon = SafeLoader.safe_load_image(casualties_icon_path, size=(24, 28))
 
         # Land battles summary
         land_battles_count = len(land_stats['land_battles'])
         attacker_land_wins_count = land_stats['attacker_land_wins']
         defender_land_wins_count = land_stats['defender_land_wins']
+        total_count = 0
+        for battle in war.battles:
+            attacker_units = battle.attacker.get('units', {})
+            defender_units = battle.defender.get('units', {})
+            total_count += sum(attacker_units.values())
+            total_count += sum(defender_units.values())
+        casualties_count = 0
+        for battle in war.battles:
+            casualties_count += battle.attacker.get("losses", 0)
+            casualties_count += battle.defender.get("losses", 0)
+
+        # Casualties icon
+        if casualties_icon:
+            photo_casualties_icon = ImageTk.PhotoImage(casualties_icon)
+            self.image_refs.append(photo_casualties_icon)
+            casualties_icon_id = self.canvas.create_image(detail_x + 219, stats_y_position, anchor=tk.NW, image=photo_casualties_icon)
+            self._tab3_widgets.append(casualties_icon_id)
 
         # Land battles icon
         if army_icon:
@@ -4162,28 +4540,114 @@ class WarAnalyzerGUI:
             army_icon_id = self.canvas.create_image(detail_x + 215, stats_y_position + 45, anchor=tk.NW, image=photo_army_icon)
             self._tab3_widgets.append(army_icon_id)
 
-        # FIXED: Use canvas text for true transparency
         # Column positions
         label_x = detail_x + 255      # Labels start here
         number_x = detail_x + 405     # Numbers aligned here
+
+        # Total row
+        total_img = self.font_manager.render_text("Total forces:", size=15, color="black")
+        if total_img:
+            # Crop transparent padding
+            bbox = total_img.getbbox()
+            if bbox:
+                total_img = total_img.crop(bbox)
+            total_photo = ImageTk.PhotoImage(total_img)
+            self.image_refs.append(total_photo)
+            self.canvas.create_image(label_x, stats_y_position + 5, anchor=tk.NW, image=total_photo)
+        
+        total_count_img = self.font_manager.render_text(f"{total_count:,}", size=15, color="black")
+        if total_count_img:
+            # Crop transparent padding for proper NE anchoring
+            bbox = total_count_img.getbbox()
+            if bbox:
+                total_count_img = total_count_img.crop(bbox)
+            total_count_photo = ImageTk.PhotoImage(total_count_img)
+            self.image_refs.append(total_count_photo)
+            self.canvas.create_image(number_x, stats_y_position + 5, anchor=tk.NE, image=total_count_photo)
+
+        # Casualties row
+        casualties_img = self.font_manager.render_text("Total deaths:", size=15, color="black")
+        if casualties_img:
+            # Crop transparent padding
+            bbox = casualties_img.getbbox()
+            if bbox:
+                casualties_img = casualties_img.crop(bbox)
+            casualties_photo = ImageTk.PhotoImage(casualties_img)
+            self.image_refs.append(casualties_photo)
+            self.canvas.create_image(label_x, stats_y_position + 19, anchor=tk.NW, image=casualties_photo)
+
+        casualties_count_img = self.font_manager.render_text(f"{casualties_count:,}", size=15, color="black")
+        if casualties_count_img:
+            # Crop transparent padding for proper NE anchoring 
+            bbox = casualties_count_img.getbbox()
+            if bbox:
+                casualties_count_img = casualties_count_img.crop(bbox)
+            casualties_count_photo = ImageTk.PhotoImage(casualties_count_img)
+            self.image_refs.append(casualties_count_photo)
+            self.canvas.create_image(number_x, stats_y_position + 19, anchor=tk.NE, image=casualties_count_photo)
         
         # Land battles row
-        self.canvas.create_text(label_x, stats_y_position + 39, text="Land Battles:", 
-                            anchor=tk.NW, font=("Arial", 8), fill="black")
-        self.canvas.create_text(number_x, stats_y_position + 39, text=str(land_battles_count), 
-                            anchor=tk.NE, font=("Arial", 8), fill="black")
+        land_battles_img = self.font_manager.render_text("Land Battles:", size=15, color="black")
+        if land_battles_img:
+            # Crop transparent padding
+            bbox = land_battles_img.getbbox()
+            if bbox:
+                land_battles_img = land_battles_img.crop(bbox)
+            land_battles_photo = ImageTk.PhotoImage(land_battles_img)
+            self.image_refs.append(land_battles_photo)
+            self.canvas.create_image(label_x, stats_y_position + 37, anchor=tk.NW, image=land_battles_photo)
+        
+        land_count_img = self.font_manager.render_text(str(land_battles_count), size=15, color="black")
+        if land_count_img:
+            # Crop transparent padding for proper NE anchoring
+            bbox = land_count_img.getbbox()
+            if bbox:
+                land_count_img = land_count_img.crop(bbox)
+            land_count_photo = ImageTk.PhotoImage(land_count_img)
+            self.image_refs.append(land_count_photo)
+            self.canvas.create_image(number_x, stats_y_position + 37, anchor=tk.NE, image=land_count_photo)
 
         # Attacker wins row
-        self.canvas.create_text(label_x, stats_y_position + 51, text="Attackers Won:", 
-                            anchor=tk.NW, font=("Arial", 8), fill="black")
-        self.canvas.create_text(number_x, stats_y_position + 51, text=str(attacker_land_wins_count), 
-                            anchor=tk.NE, font=("Arial", 8), fill="black")
+        atk_wins_img = self.font_manager.render_text("Attackers Won:", size=15, color="black")
+        if atk_wins_img:
+            # Crop transparent padding
+            bbox = atk_wins_img.getbbox()
+            if bbox:
+                atk_wins_img = atk_wins_img.crop(bbox)
+            atk_wins_photo = ImageTk.PhotoImage(atk_wins_img)
+            self.image_refs.append(atk_wins_photo)
+            self.canvas.create_image(label_x, stats_y_position + 51, anchor=tk.NW, image=atk_wins_photo)
+        
+        atk_count_img = self.font_manager.render_text(str(attacker_land_wins_count), size=15, color="black")
+        if atk_count_img:
+            # Crop transparent padding for proper NE anchoring
+            bbox = atk_count_img.getbbox()
+            if bbox:
+                atk_count_img = atk_count_img.crop(bbox)
+            atk_count_photo = ImageTk.PhotoImage(atk_count_img)
+            self.image_refs.append(atk_count_photo)
+            self.canvas.create_image(number_x, stats_y_position + 51, anchor=tk.NE, image=atk_count_photo)
 
         # Defender wins row
-        self.canvas.create_text(label_x, stats_y_position + 63, text="Defenders Won:", 
-                            anchor=tk.NW, font=("Arial", 8), fill="black")
-        self.canvas.create_text(number_x, stats_y_position + 63, text=str(defender_land_wins_count), 
-                            anchor=tk.NE, font=("Arial", 8), fill="black")
+        def_wins_img = self.font_manager.render_text("Defenders Won:", size=15, color="black")
+        if def_wins_img:
+            # Crop transparent padding
+            bbox = def_wins_img.getbbox()
+            if bbox:
+                def_wins_img = def_wins_img.crop(bbox)
+            def_wins_photo = ImageTk.PhotoImage(def_wins_img)
+            self.image_refs.append(def_wins_photo)
+            self.canvas.create_image(label_x, stats_y_position + 65, anchor=tk.NW, image=def_wins_photo)
+        
+        def_count_img = self.font_manager.render_text(str(defender_land_wins_count), size=15, color="black")
+        if def_count_img:
+            # Crop transparent padding for proper NE anchoring
+            bbox = def_count_img.getbbox()
+            if bbox:
+                def_count_img = def_count_img.crop(bbox)
+            def_count_photo = ImageTk.PhotoImage(def_count_img)
+            self.image_refs.append(def_count_photo)
+            self.canvas.create_image(number_x, stats_y_position + 65, anchor=tk.NE, image=def_count_photo)
 
         # Naval battles summary
         naval_battles_count = len(naval_stats['naval_battles'])
@@ -4198,22 +4662,67 @@ class WarAnalyzerGUI:
             self._tab3_widgets.append(navy_icon_id)
 
         # Naval battles row
-        self.canvas.create_text(label_x, stats_y_position + 85, text="Naval Battles:", 
-                            anchor=tk.NW, font=("Arial", 8), fill="black")
-        self.canvas.create_text(number_x, stats_y_position + 85, text=str(naval_battles_count), 
-                            anchor=tk.NE, font=("Arial", 8), fill="black")
+        naval_battles_img = self.font_manager.render_text("Naval Battles:", size=15, color="black")
+        if naval_battles_img:
+            # Crop transparent padding
+            bbox = naval_battles_img.getbbox()
+            if bbox:
+                naval_battles_img = naval_battles_img.crop(bbox)
+            naval_battles_photo = ImageTk.PhotoImage(naval_battles_img)
+            self.image_refs.append(naval_battles_photo)
+            self.canvas.create_image(label_x, stats_y_position + 83, anchor=tk.NW, image=naval_battles_photo)
+        
+        naval_count_img = self.font_manager.render_text(str(naval_battles_count), size=15, color="black")
+        if naval_count_img:
+            # Crop transparent padding for proper NE anchoring
+            bbox = naval_count_img.getbbox()
+            if bbox:
+                naval_count_img = naval_count_img.crop(bbox)
+            naval_count_photo = ImageTk.PhotoImage(naval_count_img)
+            self.image_refs.append(naval_count_photo)
+            self.canvas.create_image(number_x, stats_y_position + 83, anchor=tk.NE, image=naval_count_photo)
 
         # Attacker naval wins row
-        self.canvas.create_text(label_x, stats_y_position + 97, text="Attackers Won:", 
-                            anchor=tk.NW, font=("Arial", 8), fill="black")
-        self.canvas.create_text(number_x, stats_y_position + 97, text=str(attacker_naval_wins_count), 
-                            anchor=tk.NE, font=("Arial", 8), fill="black")
+        atk_naval_wins_img = self.font_manager.render_text("Attackers Won:", size=15, color="black")
+        if atk_naval_wins_img:
+            # Crop transparent padding
+            bbox = atk_naval_wins_img.getbbox()
+            if bbox:
+                atk_naval_wins_img = atk_naval_wins_img.crop(bbox)
+            atk_naval_wins_photo = ImageTk.PhotoImage(atk_naval_wins_img)
+            self.image_refs.append(atk_naval_wins_photo)
+            self.canvas.create_image(label_x, stats_y_position + 97, anchor=tk.NW, image=atk_naval_wins_photo)
+        
+        atk_naval_count_img = self.font_manager.render_text(str(attacker_naval_wins_count), size=15, color="black")
+        if atk_naval_count_img:
+            # Crop transparent padding for proper NE anchoring
+            bbox = atk_naval_count_img.getbbox()
+            if bbox:
+                atk_naval_count_img = atk_naval_count_img.crop(bbox)
+            atk_naval_count_photo = ImageTk.PhotoImage(atk_naval_count_img)
+            self.image_refs.append(atk_naval_count_photo)
+            self.canvas.create_image(number_x, stats_y_position + 97, anchor=tk.NE, image=atk_naval_count_photo)
 
         # Defender naval wins row
-        self.canvas.create_text(label_x, stats_y_position + 109, text="Defenders Won:", 
-                            anchor=tk.NW, font=("Arial", 8), fill="black")
-        self.canvas.create_text(number_x, stats_y_position + 109, text=str(defender_naval_wins_count), 
-                            anchor=tk.NE, font=("Arial", 8), fill="black")
+        def_naval_wins_img = self.font_manager.render_text("Defenders Won:", size=15, color="black")
+        if def_naval_wins_img:
+            # Crop transparent padding
+            bbox = def_naval_wins_img.getbbox()
+            if bbox:
+                def_naval_wins_img = def_naval_wins_img.crop(bbox)
+            def_naval_wins_photo = ImageTk.PhotoImage(def_naval_wins_img)
+            self.image_refs.append(def_naval_wins_photo)
+            self.canvas.create_image(label_x, stats_y_position + 111, anchor=tk.NW, image=def_naval_wins_photo)
+        
+        def_naval_count_img = self.font_manager.render_text(str(defender_naval_wins_count), size=15, color="black")
+        if def_naval_count_img:
+            # Crop transparent padding for proper NE anchoring
+            bbox = def_naval_count_img.getbbox()
+            if bbox:
+                def_naval_count_img = def_naval_count_img.crop(bbox)
+            def_naval_count_photo = ImageTk.PhotoImage(def_naval_count_img)
+            self.image_refs.append(def_naval_count_photo)
+            self.canvas.create_image(number_x, stats_y_position + 111, anchor=tk.NE, image=def_naval_count_photo)
 
         # ===== SIDE MILITARY STATISTICS (ARMY SIZE, LOSSES, SHIPS, etc.) =====
         # Position the side stats lower to make room for the battle win statistics
@@ -4227,8 +4736,9 @@ class WarAnalyzerGUI:
         self._draw_side_military_stats(war, detail_x + 424, side_stats_y_position, is_attacker=False,
                                     land_stats=land_stats, naval_stats=naval_stats)
 
-        # ===== WAR SCORE VISUALIZATION =====
-        self._draw_war_score_visualization(war, detail_x + 2, detail_y)
+        # Calculate war statistics to get the war score
+        stats = WarAnalyzer.calculate_war_statistics(war)
+        self._draw_war_score(self.canvas, stats.war_score_estimate, detail_x + 313, detail_y + 30)
 
         # ===== WAR GOALS DISPLAY - RESTORE ORIGINAL POSITION =====
         if war.goals:
@@ -4259,28 +4769,17 @@ class WarAnalyzerGUI:
                     self._tab3_widgets.append(icon_id)
             
             # ===== GOAL TEXT (SEPARATE) =====
-            goal_strip = Image.new("RGBA", (588, 15), (0, 0, 0, 0))
-            draw_goal = ImageDraw.Draw(goal_strip)
-            
-            # Draw TRANSLATED goal text
-            bbox_goal = arial_font.getbbox(translated_goal)
-            text_width_goal = bbox_goal[2] - bbox_goal[0]
-            
-            # ADJUST TEXT POSITION RELATIVE TO ICON - MOVED FURTHER RIGHT
-            text_x_goal = max(0, (588 - text_width_goal) // 2)
-            text_y_goal = 0
-            
-            # Draw black text with Arial font for goal
-            draw_goal.text((text_x_goal, text_y_goal), translated_goal, font=arial_font, fill=(255, 255, 255, 255))
-            
-            photo_goal = ImageTk.PhotoImage(goal_strip)
-            self.image_refs.append(photo_goal)
-            
-            # ADJUST TEXT POSITION HERE - MOVED FURTHER RIGHT
-            goal_text_x_position = detail_x + 20  # Move text 10px to the right from icon
-            goal_text_y_position = detail_y - 4  # Same Y as icon
-            goal_id = self.canvas.create_image(goal_text_x_position, goal_text_y_position, anchor=tk.NW, image=photo_goal)
-            self._tab3_widgets.append(goal_id)
+            # Render goal text using BMFont
+            goal_img = self.font_manager.render_bold_text(translated_goal, size=12, color="white")
+            if goal_img is not None:
+                goal_photo = ImageTk.PhotoImage(goal_img)
+                self.image_refs.append(goal_photo)
+                
+                # ADJUST TEXT POSITION HERE - MOVED FURTHER RIGHT
+                goal_text_x_position = WINDOW_WIDTH // 2  # Position next to icon
+                goal_text_y_position = detail_y - 2   # Same Y as icon
+                goal_id = self.canvas.create_image(goal_text_x_position, goal_text_y_position, anchor=tk.N, image=goal_photo)
+                self._tab3_widgets.append(goal_id)
                                 
         # ===== COMPACT SUMMARY WITHOUT DATE OR GOALS =====
         # Create compact summary frame (positioned below war goals)
@@ -4289,7 +4788,6 @@ class WarAnalyzerGUI:
         # Calculate summary position based on number of war goals
         summary_y_position = detail_y + 188
 
-            
         frame_wid = self.canvas.create_window(detail_x, summary_y_position, anchor=tk.NW, window=summary_frame)
         self._tab3_widgets.append(frame_wid)
         
@@ -4311,14 +4809,13 @@ class WarAnalyzerGUI:
             for i, battle in enumerate(war.battles):
                 self._draw_battle_row(battles_scrollable.frame_inside, battle, i, battle_row_bg)
         else:
-            no_battles_label = tk.Label(
-                self.root,
-                text="No battles recorded",
-                font=("Arial", 9),
-                bg=BG_COLOR
-            )
-            no_battles_id = self.canvas.create_window(detail_x, summary_y_position + 50, anchor=tk.NW, window=no_battles_label)
-            self._tab3_widgets.append(no_battles_id)
+            # Render "No battles" text using BMFont
+            no_battles_img = self.font_manager.render_text("No battles recorded", size=15, color="black")
+            if no_battles_img:
+                no_battles_photo = ImageTk.PhotoImage(no_battles_img)
+                self.image_refs.append(no_battles_photo)
+                no_battles_id = self.canvas.create_image(detail_x, summary_y_position + 50, anchor=tk.NW, image=no_battles_photo)
+                self._tab3_widgets.append(no_battles_id)
 
     def _calculate_land_statistics(self, war: War) -> Dict:
         """Calculate land battle statistics - ONLY COUNTING LAND UNITS."""
@@ -4511,16 +5008,46 @@ class WarAnalyzerGUI:
         number_x = x + 195  # Fixed position for numbers
 
         # Army size
-        self.canvas.create_text(label_x, y + 4, text="Army size:", 
-                            anchor=tk.NW, font=("Arial", 8), fill="black")
-        self.canvas.create_text(number_x, y + 4, text=f"{total_land_army:,}", 
-                            anchor=tk.NE, font=("Arial", 8), fill="black")
+        army_size_label = self.font_manager.render_text("Army size:", size=15, color="black")
+        if army_size_label:
+            # Crop transparent padding
+            bbox = army_size_label.getbbox()
+            if bbox:
+                army_size_label = army_size_label.crop(bbox)
+            army_size_photo = ImageTk.PhotoImage(army_size_label)
+            self.image_refs.append(army_size_photo)
+            self.canvas.create_image(label_x, y + 4, anchor=tk.NW, image=army_size_photo)
+        
+        army_size_number = self.font_manager.render_text(f"{total_land_army:,}", size=15, color="black")
+        if army_size_number:
+            # Crop transparent padding for proper NE anchoring
+            bbox = army_size_number.getbbox()
+            if bbox:
+                army_size_number = army_size_number.crop(bbox)
+            army_size_num_photo = ImageTk.PhotoImage(army_size_number)
+            self.image_refs.append(army_size_num_photo)
+            self.canvas.create_image(number_x, y + 4, anchor=tk.NE, image=army_size_num_photo)
 
         # Army losses
-        self.canvas.create_text(label_x, y + 16, text="Losses:", 
-                            anchor=tk.NW, font=("Arial", 8), fill="black")
-        self.canvas.create_text(number_x, y + 16, text=f"{total_land_losses:,}", 
-                            anchor=tk.NE, font=("Arial", 8), fill="black")
+        losses_label = self.font_manager.render_text("Losses:", size=15, color="black")
+        if losses_label:
+            # Crop transparent padding
+            bbox = losses_label.getbbox()
+            if bbox:
+                losses_label = losses_label.crop(bbox)
+            losses_photo = ImageTk.PhotoImage(losses_label)
+            self.image_refs.append(losses_photo)
+            self.canvas.create_image(label_x, y + 18, anchor=tk.NW, image=losses_photo)
+        
+        losses_number = self.font_manager.render_text(f"{total_land_losses:,}", size=15, color="black")
+        if losses_number:
+            # Crop transparent padding for proper NE anchoring
+            bbox = losses_number.getbbox()
+            if bbox:
+                losses_number = losses_number.crop(bbox)
+            losses_num_photo = ImageTk.PhotoImage(losses_number)
+            self.image_refs.append(losses_num_photo)
+            self.canvas.create_image(number_x, y + 18, anchor=tk.NE, image=losses_num_photo)
 
         # Draw naval ships icon and text - NOW ONLY NAVAL UNITS
         ships_icon_path = self.state.get_modded_path(os.path.join("gfx", "interface", "unit_strip_naval_combat_1_R.dds"))
@@ -4536,63 +5063,161 @@ class WarAnalyzerGUI:
             self.canvas.create_image(x, y + 46, anchor=tk.NW, image=photo_ships)
 
         # Navy size
-        self.canvas.create_text(label_x, y + 50, text="Navy size:", 
-                            anchor=tk.NW, font=("Arial", 8), fill="black")
-        self.canvas.create_text(number_x, y + 50, text=f"{total_naval_ships:,}", 
-                            anchor=tk.NE, font=("Arial", 8), fill="black")
+        navy_size_label = self.font_manager.render_text("Navy size:", size=15, color="black")
+        if navy_size_label:
+            # Crop transparent padding
+            bbox = navy_size_label.getbbox()
+            if bbox:
+                navy_size_label = navy_size_label.crop(bbox)
+            navy_size_photo = ImageTk.PhotoImage(navy_size_label)
+            self.image_refs.append(navy_size_photo)
+            self.canvas.create_image(label_x, y + 50, anchor=tk.NW, image=navy_size_photo)
+        
+        navy_size_number = self.font_manager.render_text(f"{total_naval_ships:,}", size=15, color="black")
+        if navy_size_number:
+            # Crop transparent padding for proper NE anchoring
+            bbox = navy_size_number.getbbox()
+            if bbox:
+                navy_size_number = navy_size_number.crop(bbox)
+            navy_size_num_photo = ImageTk.PhotoImage(navy_size_number)
+            self.image_refs.append(navy_size_num_photo)
+            self.canvas.create_image(number_x, y + 50, anchor=tk.NE, image=navy_size_num_photo)
 
         # Navy sunk
-        self.canvas.create_text(label_x, y + 62, text="Sunk:", 
-                            anchor=tk.NW, font=("Arial", 8), fill="black")
-        self.canvas.create_text(number_x, y + 62, text=f"{total_naval_losses:,}", 
-                            anchor=tk.NE, font=("Arial", 8), fill="black")
+        sunk_label = self.font_manager.render_text("Sunk:", size=15, color="black")
+        if sunk_label:
+            # Crop transparent padding
+            bbox = sunk_label.getbbox()
+            if bbox:
+                sunk_label = sunk_label.crop(bbox)
+            sunk_photo = ImageTk.PhotoImage(sunk_label)
+            self.image_refs.append(sunk_photo)
+            self.canvas.create_image(label_x, y + 64, anchor=tk.NW, image=sunk_photo)
+        
+        sunk_number = self.font_manager.render_text(f"{total_naval_losses:,}", size=15, color="black")
+        if sunk_number:
+            # Crop transparent padding for proper NE anchoring
+            bbox = sunk_number.getbbox()
+            if bbox:
+                sunk_number = sunk_number.crop(bbox)
+            sunk_num_photo = ImageTk.PhotoImage(sunk_number)
+            self.image_refs.append(sunk_num_photo)
+            self.canvas.create_image(number_x, y + 64, anchor=tk.NE, image=sunk_num_photo)
 
-    def _create_button(self, text: str, command, width: int = 144, height: int = 36) -> tk.Label:
-        """Create a styled button using game graphics."""
+    def _create_button(self, text: str, command, width: int = 144, height: int = 36) -> tk.Frame:
+        """Create button with text rendered as separate layer above button image"""
+        # Create a frame to hold the canvas
+        frame = tk.Frame(self.root, bg=BG_COLOR, borderwidth=0, highlightthickness=0)
+        
+        # Load button image
         btn_path = self.state.get_modded_path(os.path.join("gfx", "interface", "button_standard_144.tga"))
         btn_img = SafeLoader.safe_load_image(btn_path, size=(width, height))
         
         if not btn_img:
-            return tk.Button(self.root, text=text, command=command)
+            # Fallback to normal button
+            btn = tk.Button(frame, text=text, command=command)
+            btn.pack()
+            return frame
         
-        draw = ImageDraw.Draw(btn_img)
-        bbox = self.font_manager.font_14.getbbox(text)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        draw.text(((btn_img.width - text_width) // 2, (btn_img.height - text_height) // 2),
-                 text, font=self.font_manager.font_14, fill="black")
+        # Create canvas with exact button size
+        canvas = tk.Canvas(frame, width=width, height=height, bg=BG_COLOR, 
+                        borderwidth=0, highlightthickness=0)
+        canvas.pack()
         
-        photo = ImageTk.PhotoImage(btn_img)
-        self.image_refs.append(photo)
+        # Convert button to PhotoImage and add to canvas
+        btn_photo = ImageTk.PhotoImage(btn_img)
+        self.image_refs.append(btn_photo)
+        canvas.create_image(0, 0, anchor=tk.NW, image=btn_photo)
         
-        label = tk.Label(self.root, image=photo, cursor="hand2", borderwidth=0, highlightthickness=0, bg=BG_COLOR)
-        label.photo = photo
-        label.bind("<Button-1>", lambda e: command())
-        return label
+        # Render text using FontManager
+        text_image = self.font_manager.render_text(text, 18, "black")
+
+        # Crop ALL transparent padding from the text image
+        bbox = text_image.getbbox()  # Gets (left, top, right, bottom) of non-transparent area
+        if bbox:
+            text_image = text_image.crop(bbox)
+
+        # Now center the properly cropped image
+        text_photo = ImageTk.PhotoImage(text_image)
+        self.image_refs.append(text_photo)
+
+        text_x = width // 2
+        text_y = height // 2
+        canvas.create_image(text_x, text_y, anchor=tk.CENTER, image=text_photo)
+        
+        # Make canvas clickable
+        canvas.bind("<Button-1>", lambda e: command())
+        canvas.configure(cursor="hand2")
+        
+        return frame
+
+    def _calculate_image_sharpness(self, image: Image.Image) -> float:
+        """Very simple sharpness calculation"""
+        if image.mode != 'L':
+            image = image.convert('L')
+        
+        import numpy as np
+        arr = np.array(image)
+        
+        # Simple edge detection (Laplacian)
+        gy, gx = np.gradient(arr)
+        sharpness = np.sqrt(gx**2 + gy**2).mean()
+        
+        return sharpness
     
     def _draw_tabs(self):
         """Draw tab buttons."""
+        if not hasattr(self, 'tab_canvases'):
+            self.tab_canvases = []
+            
         tab_width = 144
         tab_height = 25
+        baseline_y = 2  # Top anchor
 
         for i, (key, tab_data) in enumerate(self.tab_definitions.items()):
             x = 29 + i * (tab_width + 16)
             y = 23
 
-            img = Image.new("RGBA", (tab_width, tab_height), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(img)
+            # Create canvas for this tab
+            tab_canvas = tk.Canvas(self.canvas, width=tab_width, height=tab_height, 
+                                 bg=BG_COLOR, borderwidth=0, highlightthickness=0)
+            
+            self.tab_canvases.append(tab_canvas)
+            
+            # Render text using BMFont
             text = tab_data["label"]
-            bbox = self.font_manager.font_16.getbbox(text)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-            draw.text(((tab_width - text_width) // 2, (tab_height - text_height) // 2),
-                     text, font=self.font_manager.font_16, fill=(0, 0, 0))
-
-            photo = ImageTk.PhotoImage(img)
-            self.image_refs.append(photo)
-
-            canvas_id = self.canvas.create_image(x, y, anchor=tk.NW, image=photo, tags=(f"tab_{key}",))
-            self.canvas.tag_bind(f"tab_{key}", "<Button-1>", lambda e, k=key: self._on_tab_click(k))
+            text_image = self.font_manager.render_text(text, size=22, color="black")
+            
+            # Find the actual text bounds for proper centering
+            bbox = text_image.getbbox()  # (left, top, right, bottom)
+            if bbox:
+                # Calculate the horizontal center of the actual text content
+                text_content_width = bbox[2] - bbox[0]  # right - left
+                text_content_center_x = bbox[0] + (text_content_width // 2)
+                
+                # Calculate offset needed to center the text content
+                content_offset_x = (text_image.width // 2) - text_content_center_x
+                
+                # Position to center the actual text content, not the padded image
+                text_x = (tab_width // 2) + content_offset_x
+            else:
+                # Fallback: center the entire image
+                text_x = tab_width // 2
+            
+            # Convert text to PhotoImage
+            text_photo = ImageTk.PhotoImage(text_image)
+            self.image_refs.append(text_photo)
+            
+            # Add text to canvas - centered based on actual content
+            text_y = baseline_y
+            tab_canvas.create_image(text_x, text_y, anchor=tk.N, image=text_photo)
+            
+            # Make canvas clickable
+            tab_canvas.bind("<Button-1>", lambda e, k=key: self._on_tab_click(k))
+            tab_canvas.configure(cursor="hand2")
+            
+            # Place the tab canvas on the main canvas
+            self.canvas.create_window(x, y, anchor=tk.NW, window=tab_canvas, tags=(f"tab_{key}",))
     
     def _draw_tab_content(self, tab_name: str):
         """Draw content for a specific tab with proper cleanup"""
@@ -4773,7 +5398,7 @@ class WarAnalyzerGUI:
         load_btn = self._create_button("Load Save File", self.load_save)
         self.canvas.create_window(200, 140, anchor=tk.NW, window=load_btn)
         
-        self.save_label = tk.Label(self.root, text=self.state.save_file_path, wraplength=640, 
+        self.save_label = tk.Label(self.root, text=self.state.save_file_path, wraplength=600, 
                                 justify=tk.LEFT, bg=BG_COLOR, font=("Arial", 9))
         self.canvas.create_window(30, 180, anchor=tk.NW, window=self.save_label)
         
@@ -4831,43 +5456,46 @@ class WarAnalyzerGUI:
             # Resize to specified width and height
             final_img = cropped_img.resize((width, height), Image.Resampling.LANCZOS)
             
-            # Add text using custom font
+            # Create canvas for button with separate text rendering
+            button_canvas = tk.Canvas(self.canvas, width=width, height=height, bg=BG_COLOR,
+                                    borderwidth=0, highlightthickness=0)
+            
+            # Convert button image to PhotoImage
+            btn_photo = ImageTk.PhotoImage(final_img)
+            self.image_refs.append(btn_photo)
+            button_canvas.create_image(0, 0, anchor=tk.NW, image=btn_photo)
+            
+            # Add text using BMFont
             if text:
-                draw = ImageDraw.Draw(final_img)
+                text_image = self.font_manager.render_text(text, size=18, color="black")
                 
-                # Use the custom font for text rendering
-                bbox = self.font_manager.font_14.getbbox(text)
-                text_width = bbox[2] - bbox[0]
-                text_height = bbox[3] - bbox[1]
+                # Crop transparent padding for proper centering
+                bbox = text_image.getbbox()
+                if bbox:
+                    text_image = text_image.crop(bbox)
                 
-                # Calculate position for perfect vertical centering
-                try:
-                    # Try to get font metrics if available
-                    ascent, descent = self.font_manager.font_14.getmetrics()
-                    total_height = ascent + descent
-                    # Center based on actual font metrics
-                    text_x = (width - text_width) // 2
-                    text_y = (height - total_height) // 2 + ascent - 10  # Minor adjustment for visual centering
-                except:
-                    # Fallback if we can't get metrics
-                    text_x = (width - text_width) // 2
-                    text_y = (height - text_height) // 2 - 1
+                # Convert text to PhotoImage
+                text_photo = ImageTk.PhotoImage(text_image)
+                self.image_refs.append(text_photo)
                 
-                # Draw text with custom font
-                draw.text((text_x, text_y), text, font=self.font_manager.font_14, fill="black")
+                # Calculate centered position for text
+                text_x = width // 2
+                text_y = height // 2
+                
+                # Add text as separate layer above button
+                button_canvas.create_image(text_x, text_y, anchor=tk.CENTER, image=text_photo)
             
-            photo = ImageTk.PhotoImage(final_img)
-            self.image_refs.append(photo)
-            
-            # Create the button as a canvas image with click handler
-            button_id = self.canvas.create_image(x, y, anchor=tk.NW, image=photo)
+            # Place the button canvas on the main canvas
+            button_id = self.canvas.create_window(x, y, anchor=tk.NW, window=button_canvas)
             
             # Bind click event to clear filter
             def clear_filter(event):
                 self.state.selected_countries.clear()
                 self._rebuild_and_refresh()
             
-            self.canvas.tag_bind(button_id, "<Button-1>", clear_filter)
+            button_canvas.bind("<Button-1>", clear_filter)
+            button_canvas.configure(cursor="hand2")
+            
         else:
             # Fallback: draw rectangle and text if image loading fails
             rect_id = self.canvas.create_rectangle(x, y, x + width, y + height, 
@@ -4922,7 +5550,7 @@ class WarAnalyzerGUI:
         # Define battle-specific sort buttons
         battle_buttons = [
             ("sortbutton_164.dds", SORT_BUTTON_X, SORT_BUTTON_Y, 166, 20, "Province", 5, 7),
-            ("sortbutton_42.dds", SORT_BUTTON_X + 166, SORT_BUTTON_Y, 42, 20, "Terrain", 5, 7),
+            ("sortbutton_42.dds", SORT_BUTTON_X + 166, SORT_BUTTON_Y, 42, 20, "", 5, 7),
             ("sortbutton_200.dds", SORT_BUTTON_X + 166 + 42, SORT_BUTTON_Y, 200, 20, "", 5, 7),
             ("sortbutton_soi.dds", SORT_BUTTON_X + 174 + 42 + 24 * 8, SORT_BUTTON_Y, 28, 20, "", 0, 0),
             ("sort_prestige_rank.dds", SORT_BUTTON_X + 174 + 42 + 24 * 8 + 28, SORT_BUTTON_Y, 24, 20, "", 2, 2),
@@ -4954,34 +5582,37 @@ class WarAnalyzerGUI:
             # Resize to specified width and height
             final_img = cropped_img.resize((width, height), Image.Resampling.LANCZOS)
             
-            # Add text using custom font if specified
-            if text:
-                draw = ImageDraw.Draw(final_img)
-                
-                # Use the custom font for text rendering
-                bbox = self.font_manager.font_14.getbbox(text)
-                text_width = bbox[2] - bbox[0]
-                text_height = bbox[3] - bbox[1]
-                
-                # Calculate position for perfect vertical centering
-                try:
-                    # Try to get font metrics if available
-                    ascent, descent = self.font_manager.font_14.getmetrics()
-                    total_height = ascent + descent
-                    # Center based on actual font metrics
-                    text_x = (width - text_width) // 2
-                    text_y = (height - total_height) // 2 + ascent - 10  # Minor adjustment for visual centering
-                except:
-                    # Fallback if we can't get metrics
-                    text_x = (width - text_width) // 2
-                    text_y = (height - text_height) // 2 - 1
-                
-                # Draw text with custom font
-                draw.text((text_x, text_y), text, font=self.font_manager.font_14, fill="black")
+            # Create canvas for button with separate text rendering
+            button_canvas = tk.Canvas(self.canvas, width=width, height=height, bg=BG_COLOR,
+                                    borderwidth=0, highlightthickness=0)
             
-            photo = ImageTk.PhotoImage(final_img)
-            self.image_refs.append(photo)
-            button_id = self.canvas.create_image(x, y, anchor=tk.NW, image=photo)
+            # Convert button image to PhotoImage
+            btn_photo = ImageTk.PhotoImage(final_img)
+            self.image_refs.append(btn_photo)
+            button_canvas.create_image(0, 0, anchor=tk.NW, image=btn_photo)
+            
+            # Add text using BMFont
+            if text:
+                text_image = self.font_manager.render_text(text, size=18, color="black")
+                
+                # Crop transparent padding for proper centering
+                bbox = text_image.getbbox()
+                if bbox:
+                    text_image = text_image.crop(bbox)
+                
+                # Convert text to PhotoImage
+                text_photo = ImageTk.PhotoImage(text_image)
+                self.image_refs.append(text_photo)
+                
+                # Calculate centered position for text
+                text_x = width // 2
+                text_y = height // 2
+                
+                # Add text as separate layer above button
+                button_canvas.create_image(text_x, text_y, anchor=tk.CENTER, image=text_photo)
+            
+            # Place the button canvas on the main canvas
+            button_id = self.canvas.create_window(x, y, anchor=tk.NW, window=button_canvas)
             
             # ADD CLICK HANDLER FOR CLEAR FILTER BUTTON
             if text == "Clear filter":
@@ -4990,7 +5621,8 @@ class WarAnalyzerGUI:
                     self._rebuild_and_refresh()
                     # After clearing filter, redraw the tab to update the war count
                     self._draw_tab_content("Tab2")
-                self.canvas.tag_bind(button_id, "<Button-1>", clear_filter)
+                button_canvas.bind("<Button-1>", clear_filter)
+                button_canvas.configure(cursor="hand2")
             
         else:
             # Fallback: draw rectangle and text if image loading fails
@@ -5013,7 +5645,8 @@ class WarAnalyzerGUI:
                         self.state.selected_countries.clear()
                         self._rebuild_filtered_wars()  # Just update the filtered list
                         self._draw_tab_content("Tab2")  # Redraw the tab to refresh display
-                    self.canvas.tag_bind(button_id, "<Button-1>", clear_filter)
+                    self.canvas.tag_bind(rect_id, "<Button-1>", clear_filter)
+                    self.canvas.tag_bind(text_id, "<Button-1>", clear_filter)
         
     def _get_all_filter_countries(self) -> List[str]:
         """Get all countries that should appear in the filter list."""
@@ -5231,51 +5864,31 @@ class WarList:
         attacker_army_str = format_army_size(total_attacker_army)
         defender_army_str = format_army_size(total_defender_army)
 
-        # Draw attacker army size (left of war score)
-        attacker_text = f"{attacker_army_str}"
-        attacker_img = Image.new("RGBA", (30, 15), (0, 0, 0, 0))
-        draw_attacker = ImageDraw.Draw(attacker_img)
+        # Draw attacker army size (left of war score) using BMFont
+        attacker_text_img = self.font_manager.render_text(attacker_army_str, size=12, color="black")
+        if attacker_text_img:
+            # Crop transparent padding for proper centering
+            bbox = attacker_text_img.getbbox()
+            if bbox:
+                attacker_text_img = attacker_text_img.crop(bbox)
+            attacker_photo = ImageTk.PhotoImage(attacker_text_img)
+            self.image_refs.append(attacker_photo)
+            row_canvas.create_image(170, 40, anchor=tk.CENTER, image=attacker_photo)  # Left of war score
 
-        try:
-            arial_font = ImageFont.truetype("arial.ttf", 11)
-        except:
-            try:
-                arial_font = ImageFont.truetype("Arial", 11)
-            except:
-                arial_font = ImageFont.load_default()
-
-        # Calculate text width for centering
-        attacker_bbox = arial_font.getbbox(attacker_text)
-        attacker_text_width = attacker_bbox[2] - attacker_bbox[0]
-        attacker_text_height = attacker_bbox[3] - attacker_bbox[1]
-        attacker_text_x = (30 - attacker_text_width) // 2
-        attacker_text_y = (15 - attacker_text_height) // 2
-
-        draw_attacker.text((attacker_text_x, attacker_text_y), attacker_text, font=arial_font, fill=(0, 0, 0, 255))
-        attacker_photo = ImageTk.PhotoImage(attacker_img)
-        self.image_refs.append(attacker_photo)
-        row_canvas.create_image(170, 38, anchor=tk.CENTER, image=attacker_photo)  # Left of war score
-
-        # Draw defender army size (right of war score)
-        defender_text = f"{defender_army_str}"
-        defender_img = Image.new("RGBA", (30, 15), (0, 0, 0, 0))
-        draw_defender = ImageDraw.Draw(defender_img)
-
-        # Calculate text width for centering
-        defender_bbox = arial_font.getbbox(defender_text)
-        defender_text_width = defender_bbox[2] - defender_bbox[0]
-        defender_text_height = defender_bbox[3] - defender_bbox[1]
-        defender_text_x = (30 - defender_text_width) // 2
-        defender_text_y = (15 - defender_text_height) // 2
-
-        draw_defender.text((defender_text_x, defender_text_y), defender_text, font=arial_font, fill=(0, 0, 0, 255))
-        defender_photo = ImageTk.PhotoImage(defender_img)
-        self.image_refs.append(defender_photo)
-        row_canvas.create_image(431, 38, anchor=tk.CENTER, image=defender_photo)  # Right of war score
+        # Draw defender army size (right of war score) using BMFont
+        defender_text_img = self.font_manager.render_text(defender_army_str, size=12, color="black")
+        if defender_text_img:
+            # Crop transparent padding for proper centering
+            bbox = defender_text_img.getbbox()
+            if bbox:
+                defender_text_img = defender_text_img.crop(bbox)
+            defender_photo = ImageTk.PhotoImage(defender_text_img)
+            self.image_refs.append(defender_photo)
+            row_canvas.create_image(429, 40, anchor=tk.CENTER, image=defender_photo)  # Right of war score
         
         # Draw war score visualization in center (original size with overlay)
         war_score = stats.war_score_estimate
-        self._draw_mini_war_score(row_canvas, war_score, 300, 40)
+        self.gui._draw_war_score(row_canvas, war_score, 300, 40)
         
         # Flags - update to use the advanced method
         self._draw_war_list_flags_advanced(row_canvas, war.attackers, 10, 8, "left", war.original_attacker, flag_overlay)
@@ -5310,74 +5923,6 @@ class WarList:
         row.bind("<Button-1>", on_click)
         row_canvas.bind("<Button-1>", on_click)
 
-    def _draw_mini_war_score(self, canvas, war_score: float, x: int, y: int):
-        """Draw a mini war score visualization for the war list with original size and overlay."""
-        # War score is already -100 to +100, no normalization needed
-        
-        # Load overlay and progress bars at original size
-        overlay_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_progress_overlay.dds"))
-        progress1_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_progress1.dds"))
-        progress2_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_progress2.dds"))
-        
-        overlay = SafeLoader.safe_load_image(overlay_path, size=(224, 24))
-        progress1 = SafeLoader.safe_load_image(progress1_path, size=(216, 16))
-        progress2 = SafeLoader.safe_load_image(progress2_path, size=(216, 16))
-        
-        if overlay and progress1 and progress2:
-            # Create composite image with original size
-            composite = Image.new("RGBA", (224, 24), (0, 0, 0, 0))
-            
-            # Position progress bars
-            progress_x = 4
-            progress_y = 4
-            
-            # ALWAYS draw defender progress bar (progress2) at full width
-            composite.paste(progress2, (progress_x, progress_y))
-            
-            # Convert war score (-100 to +100) to percentage of progress1 to show (0% to 100%)
-            progress1_percentage = (war_score + 100) / 200.0  # Convert to 0.0 to 1.0
-            
-            # Calculate crop amount: 0% progress1 = full crop (216px), 100% progress1 = no crop (0px)
-            crop_amount = int(216 * (1.0 - progress1_percentage))
-            crop_amount = max(0, min(216, crop_amount))
-            
-            if crop_amount < 216:
-                progress1_cropped = progress1.crop((0, 0, 216 - crop_amount, 16))
-                composite.paste(progress1_cropped, (progress_x, progress_y))
-            
-            # Add the overlay on top
-            composite.alpha_composite(overlay)
-            
-            # Add percentage text in the middle
-            draw = ImageDraw.Draw(composite)
-            
-            # Show whole numbers without decimals
-            if war_score > 0:
-                percentage_text = f"{int(war_score)}%"
-            elif war_score < 0:
-                percentage_text = f"{int(war_score)}%"
-            else:
-                percentage_text = "0%"
-            
-            try:
-                font = ImageFont.truetype(DEFAULT_FONT_PATH, 14)
-            except:
-                font = ImageFont.load_default()
-            
-            # Center text in 224px width
-            bbox = font.getbbox(percentage_text)
-            text_width = bbox[2] - bbox[0]
-            text_x = (224 - text_width) // 2
-            text_y = 5
-            
-            draw.text((text_x, text_y), percentage_text, font=font, fill=(0, 0, 0, 255))
-            
-            photo = ImageTk.PhotoImage(composite)
-            self.image_refs.append(photo)
-            
-            # Position the war score visualization in center
-            canvas.create_image(x, y, anchor=tk.CENTER, image=photo)
-
     def _draw_war_title(self, canvas, title: str):
         """Draw war title on canvas - shortened to make room for stats."""
         # Shorten title if too long to fit with new stats
@@ -5386,19 +5931,24 @@ class WarList:
         else:
             display_title = title
         
-        title_strip = Image.new("RGBA", (400, 28), (0, 0, 0, 0))  # Reduced width
-        draw = ImageDraw.Draw(title_strip)
-        bbox = self.font_manager.font_16.getbbox(display_title)
-        text_width = bbox[2] - bbox[0]
-        text_x = max(0, (400 - text_width) // 2)
-        text_y = 10
+        # Render text using BMFont
+        text_image = self.font_manager.render_bold_text(display_title, size=18, color="white")
         
-        draw.text((text_x, text_y), display_title, font=self.font_manager.font_16, fill=(255, 255, 255, 255))
-        draw.text((text_x + 1, text_y), display_title, font=self.font_manager.font_16, fill=(255, 255, 255, 255))
+        # Crop transparent padding for proper centering
+        bbox = text_image.getbbox()
+        if bbox:
+            text_image = text_image.crop(bbox)
         
-        photo = ImageTk.PhotoImage(title_strip)
-        self.image_refs.append(photo)
-        canvas.create_image(100, 0, anchor="nw", image=photo)  # Positioned more to the left
+        # Convert text to PhotoImage
+        text_photo = ImageTk.PhotoImage(text_image)
+        self.image_refs.append(text_photo)
+        
+        # Calculate centered position for text
+        text_x = 100 + (400 // 2)  # 100 (left offset) + half of 400 width
+        text_y = 17  # Half of 28 height
+        
+        # Add text directly to the canvas
+        canvas.create_image(text_x, text_y, anchor=tk.CENTER, image=text_photo)
 
     def _draw_war_list_flags(self, canvas, tags: List[str], x_anchor: int, y: int, side: str, highlight: Optional[str], flag_overlay: Optional[Image.Image]):
         """Draw flags for war list with maximum width constraint."""
@@ -5595,7 +6145,7 @@ class CountryFilter:
         self.image_refs = image_refs
         self.on_filter_change = on_filter_change
         self.gui = gui
-        
+        self.font_manager = FontManager(self.state)
         self.selected_bg = self._load_selected_background()
         self.unselected_bg = self._load_unselected_background()
     
