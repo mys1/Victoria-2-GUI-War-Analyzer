@@ -3267,14 +3267,10 @@ class WarAnalyzerGUI:
         """Selective memory cleanup - preserve UI elements."""
         import gc
         
-        print("=== SELECTIVE CLEANUP START ===")
-        
         # Debug: Show what's in caches before cleanup
         main_cache_size = len(self.state.image_cache.cache)
         war_cache_size = len(self.state.war_image_cache.cache)
         image_refs_size = len(self.image_refs)
-        
-        print(f"Before cleanup - Main cache: {main_cache_size}, War cache: {war_cache_size}, Image refs: {image_refs_size}")
         
         # ONLY clear war cache (flags, battle images) - preserve main cache (UI elements)
         war_cache_keys_before = list(self.state.war_image_cache.cache.keys())
@@ -3297,9 +3293,6 @@ class WarAnalyzerGUI:
         
         # Force garbage collection
         gc.collect()
-        
-        print(f"After cleanup - Cleared war cache ({len(war_cache_keys_before)} items), preserved main cache")
-        print("=== SELECTIVE CLEANUP COMPLETE ===")
         
     def _load_country_flag_for_display(self, tag: str, circular: bool = False, gp_size: bool = False) -> Optional[Image.Image]:
         """Load flag with aggressive memory limits."""
@@ -3544,7 +3537,7 @@ class WarAnalyzerGUI:
         is_naval_battle = UnitTypeClassifier.is_naval_battle_for_panel(battle, self._unit_types)
         
         # Position for unit panels
-        panels_start_x = 228
+        panels_start_x = 207
         panel_spacing = 10
         
         # Create and draw attacker unit panel
@@ -3578,23 +3571,23 @@ class WarAnalyzerGUI:
             photo_army = ImageTk.PhotoImage(cropped_icon)
             self.image_refs.append(photo_army)
             # Position between the panels
-            army_x = panels_start_x + 78 + 12  # Same position as before
+            army_x = panels_start_x + 78 + 12 + 10  # Same position as before
             army_y = 12  # Center vertically
             row_canvas.create_image(army_x, army_y, anchor="center", image=photo_army)
-        else:
-            # Fallback to "vs" text using BMFont if icon fails to load
-            vs_text_img = self.font_manager.render_text("vs", size=8, color="black", bold=True)
-            if vs_text_img:
-                # Crop transparent padding
-                bbox = vs_text_img.getbbox()
-                if bbox:
-                    vs_text_img = vs_text_img.crop(bbox)
-                vs_text_photo = ImageTk.PhotoImage(vs_text_img)
-                self.image_refs.append(vs_text_photo)
-                row_canvas.create_image(panels_start_x + 78 + 8, 12, anchor="center", image=vs_text_photo)
+        # else:
+        #     # Fallback to "vs" text using BMFont if icon fails to load
+        #     vs_text_img = self.font_manager.render_text("vs", size=8, color="black", bold=True)
+        #     if vs_text_img:
+        #         # Crop transparent padding
+        #         bbox = vs_text_img.getbbox()
+        #         if bbox:
+        #             vs_text_img = vs_text_img.crop(bbox)
+        #         vs_text_photo = ImageTk.PhotoImage(vs_text_img)
+        #         self.image_refs.append(vs_text_photo)
+        #         row_canvas.create_image(panels_start_x + 78 + 8, 12, anchor="center", image=vs_text_photo)
         
         # Create and draw defender unit panel
-        defender_panel_x = panels_start_x + 78 + 24  # Account for army icon width
+        defender_panel_x = panels_start_x + 78 + 24 + 20  # Account for army icon width
         if defender_country_tag and defender_country_tag != "?":
             defender_panel = self._create_unit_panel(
                 defender_country_tag, 
@@ -4944,7 +4937,6 @@ class WarAnalyzerGUI:
                 self._tab3_widgets.append(no_battles_id)
 
         end_image_count = len(self.image_refs)
-        print(f"War details tab created {end_image_count - start_image_count} new images")
 
     def _calculate_land_statistics(self, war: War) -> Dict:
         """Calculate land battle statistics - ONLY COUNTING LAND UNITS."""
@@ -5373,7 +5365,7 @@ class WarAnalyzerGUI:
                 self.emergency_cleanup()
             
         except Exception as e:
-            print(f"Cleanup error: {e}")
+            pass
 
         # Now draw new content - layers should still be cached
         layer_items = self.layer_cache.get(tab_name)
@@ -5686,19 +5678,19 @@ class WarAnalyzerGUI:
     def _draw_sort_buttons(self):
         """Draw all sort buttons above the country filter."""
         # Calculate war count for display
-        war_count = len(self.state.filtered_wars)
-        total_wars = len(self.state.wars_data)
-        war_count_text = f"Wars: {war_count}/{total_wars}"  # Shorter format
+        # war_count = len(self.state.filtered_wars)
+        # total_wars = len(self.state.wars_data)
+        # war_count_text = f"Wars: {war_count}/{total_wars}"  # Shorter format
         buttons = [
             ("sortbutton_164.dds", SORT_BUTTON_X, SORT_BUTTON_Y, 166, 20, "Country", 5, 7),
             ("sortbutton_42.dds", SORT_BUTTON_X + 166, SORT_BUTTON_Y, 42, 20, "", 5, 7),
-            ("sortbutton_200.dds", SORT_BUTTON_X + 166 + 42, SORT_BUTTON_Y, 200, 20, war_count_text, 5, 7),
+            ("sortbutton_200.dds", SORT_BUTTON_X + 166 + 42, SORT_BUTTON_Y, 200, 20, "Clear filter", 5, 7),
             ("sortbutton_soi.dds", SORT_BUTTON_X + 174 + 42 + 24 * 8, SORT_BUTTON_Y, 28, 20, "", 0, 0),
             ("sort_prestige_rank.dds", SORT_BUTTON_X + 174 + 42 + 24 * 8 + 28, SORT_BUTTON_Y, 24, 20, "", 2, 2),
             ("sort_industry_rank.dds", SORT_BUTTON_X + 174 + 42 + 24 * 9 + 26, SORT_BUTTON_Y, 24, 20, "", 2, 2),
             ("sort_military_rank.dds", SORT_BUTTON_X + 174 + 42 + 24 * 10 + 24, SORT_BUTTON_Y, 24, 20, "", 2, 2),
             ("sortbutton_totalrank.dds", SORT_BUTTON_X + 174 + 42 + 24 * 11 + 22, SORT_BUTTON_Y, 24, 20, "", 0, 0),
-            ("sortbutton_68.dds", SORT_BUTTON_X + 174 + 42 + 24 * 12 + 20, SORT_BUTTON_Y, 68, 20, "Clear filter", 5, 7),
+            ("sortbutton_68.dds", SORT_BUTTON_X + 174 + 42 + 24 * 12 + 20, SORT_BUTTON_Y, 68, 20, "", 5, 7),
             ("sortbutton_relation.dds", SORT_BUTTON_X + 174 + 42 + 24 * 12 + 20 + 68, SORT_BUTTON_Y, 28, 20, "", 0, 0),
         ]
         
@@ -5974,8 +5966,6 @@ class WarList:
         
         # Update navigation
         self._update_navigation_display()
-        
-        print(f"Loaded page {self.current_page + 1}: wars {start_idx + 1}-{end_idx} (Images: {len(self.current_page_image_refs)})")
 
     def create(self, wars: List[War]):
         """Create the war list with pagination controls."""
@@ -5997,15 +5987,24 @@ class WarList:
         # Position navigation below the war list
         nav_y = WAR_LIST_Y + WAR_LIST_HEIGHT
         
-        # Create frame for navigation
+        # Create frame for navigation with EXACT same width as war list
         self.navigation_frame = tk.Frame(self.root, bg=BG_COLOR)
-        self.parent_canvas.create_window(WINDOW_WIDTH // 2, nav_y, anchor=tk.N, window=self.navigation_frame)
+        
+        # Use create_rectangle to force the exact width and position
+        frame_id = self.parent_canvas.create_window(
+            WAR_LIST_X, 
+            nav_y, 
+            anchor=tk.NW, 
+            window=self.navigation_frame,
+            width=600,  # FORCE the exact width to match war list
+            height=16   # Set a fixed height
+        )
         
         # Update navigation display
         self._update_navigation_display()
 
     def _update_navigation_display(self):
-        """Update the navigation controls with current page info and buttons."""
+        """Update the navigation controls with properly cropped unitstatus_moving.dds arrows."""
         if not self.navigation_frame:
             return
             
@@ -6017,51 +6016,57 @@ class WarList:
         current_start = self.current_page * self.wars_per_page + 1
         current_end = min((self.current_page + 1) * self.wars_per_page, len(self.all_wars))
         
-        # Create a single canvas to draw everything with zero padding
-        nav_canvas = tk.Canvas(self.navigation_frame, height=14, bg=BG_COLOR, 
+        # Create a canvas that fills the entire navigation frame width
+        nav_canvas = tk.Canvas(self.navigation_frame, width=620, height=16, bg=BG_COLOR,
                             highlightthickness=0, borderwidth=0)
-        nav_canvas.pack(fill=tk.X)
+        nav_canvas.pack(fill=tk.BOTH, expand=True)
         
-        # Calculate positions
-        x_pos = 0
-        y_pos = 7  # Middle of 14px height
+        # Left: Wars count
+        wars_count_text = f"Wars {current_start}-{current_end} of {len(self.all_wars)}"
+        nav_canvas.create_text(10, 6, text=wars_count_text, anchor=tk.W, 
+                            font=("Arial", 9), fill="black")
         
-        # Page info
-        info_text = f"Wars {current_start}-{current_end} of {len(self.all_wars)}"
-        info_id = nav_canvas.create_text(x_pos, y_pos, text=info_text, anchor=tk.W, 
-                                    font=("Arial", 8), fill="black")
-        x_pos += nav_canvas.bbox(info_id)[2] + 8  # Move right after text
+        # Center: Page navigation with arrow buttons
+        center_x = 300
         
-        # Previous button
-        prev_text = "◀ Previous"
-        prev_id = nav_canvas.create_text(x_pos, y_pos, text=prev_text, anchor=tk.W,
-                                    font=("Arial", 8), fill="blue")
-        prev_bbox = nav_canvas.bbox(prev_id)
+        # Load and crop the arrow image
+        arrow_path = self.state.get_modded_path(os.path.join("gfx", "interface", "unitstatus_moving.dds"))
+        arrow_img = SafeLoader.safe_load_image(arrow_path)
         
-        if self.current_page > 0:
-            nav_canvas.tag_bind(prev_id, "<Button-1>", lambda e: self._load_previous_page())
-            nav_canvas.configure(cursor="hand2")
-        else:
-            nav_canvas.itemconfig(prev_id, fill="gray")
-        
-        x_pos += prev_bbox[2] - prev_bbox[0] + 8  # Move right
-        
-        # Page indicator
-        page_text = f"Page {self.current_page + 1}/{total_pages}"
-        page_id = nav_canvas.create_text(x_pos, y_pos, text=page_text, anchor=tk.W,
-                                    font=("Arial", 8), fill="black")
-        x_pos += nav_canvas.bbox(page_id)[2] - nav_canvas.bbox(page_id)[0] + 8  # Move right
-        
-        # Next button
-        next_text = "Next ▶"
-        next_id = nav_canvas.create_text(x_pos, y_pos, text=next_text, anchor=tk.W,
-                                    font=("Arial", 8), fill="blue")
-        
-        if self.current_page < total_pages - 1:
-            nav_canvas.tag_bind(next_id, "<Button-1>", lambda e: self._load_next_page())
-        else:
-            nav_canvas.itemconfig(next_id, fill="gray")
-
+        if arrow_img:
+            # Crop to 16x11: 3 from left, 5 from right, 6 from top, 7 from bottom
+            # Original 24x24 -> crop(3, 6, 24-5, 24-7) = crop(3, 6, 19, 17)
+            cropped_arrow = arrow_img.crop((3, 6, 19, 17))  # 16x11 pixels
+            
+            # Page indicator  
+            page_text = f"Page {self.current_page + 1}/{total_pages}"
+            page_label = tk.Label(nav_canvas, text=page_text, bg=BG_COLOR, font=("Arial", 9))
+            nav_canvas.create_window(center_x, 6, window=page_label)
+            
+            # Left arrow button - only show if there's a previous page
+            if self.current_page > 0:
+                # Use original cropped arrow pointing left
+                left_arrow_photo = ImageTk.PhotoImage(cropped_arrow)
+                self.main_image_refs.append(left_arrow_photo)
+                self.current_page_image_refs.append(left_arrow_photo)
+                
+                left_btn = nav_canvas.create_image(center_x - 40, 6, image=left_arrow_photo)
+                nav_canvas.tag_bind(left_btn, "<Button-1>", lambda e: self._load_previous_page())
+                nav_canvas.tag_bind(left_btn, "<Enter>", lambda e: nav_canvas.config(cursor="hand2"))
+                nav_canvas.tag_bind(left_btn, "<Leave>", lambda e: nav_canvas.config(cursor=""))
+            
+            # Right arrow button - only show if there's a next page
+            if self.current_page < total_pages - 1:
+                # Flip horizontally for right arrow
+                right_arrow_img = cropped_arrow.transpose(Image.FLIP_LEFT_RIGHT)
+                right_arrow_photo = ImageTk.PhotoImage(right_arrow_img)
+                self.main_image_refs.append(right_arrow_photo)
+                self.current_page_image_refs.append(right_arrow_photo)
+                
+                right_btn = nav_canvas.create_image(center_x + 40, 5, image=right_arrow_photo)
+                nav_canvas.tag_bind(right_btn, "<Button-1>", lambda e: self._load_next_page())
+                nav_canvas.tag_bind(right_btn, "<Enter>", lambda e: nav_canvas.config(cursor="hand2"))
+                nav_canvas.tag_bind(right_btn, "<Leave>", lambda e: nav_canvas.config(cursor=""))
 
     def _preload_page_flags(self, wars: List[War]):
         """Preload flags for the current page only."""
