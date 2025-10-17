@@ -164,13 +164,12 @@ class AppConfig:
 
 @dataclass
 class AppState:
-    """Central state management for the application."""
     vic2_path: Optional[str] = None
     mod_name: str = "None"
     save_file_path: str = "No save file selected"
     
-    # Data caching - FIX: Initialize as empty dict, not None
-    _wars_data: Optional[List[War]] = None
+    # Data caching
+    _wars_data: Optional[List['War']] = None
     _save_file_text: Optional[str] = None
     _parsed_great_nations: Optional[Set[str]] = None
     _parsed_country_governments: Optional[Dict[str, str]] = None
@@ -180,8 +179,16 @@ class AppState:
     _culture_mappings_cache: Optional[Dict[str, str]] = None
     _cb_types_cache: Optional[Dict[str, int]] = field(default_factory=dict)
     _unit_types_cache: Optional[Dict[str, str]] = None
-    image_cache: 'ImageCache' = field(default_factory=lambda: ImageCache(max_size=800))
-    war_image_cache: 'ImageCache' = field(default_factory=lambda: ImageCache(max_size=800))
+    
+    # Don't initialize here, do it in __post_init__
+    image_cache: 'ImageCache' = None
+    war_image_cache: 'ImageCache' = None
+    
+    def __post_init__(self):
+        if self.image_cache is None:
+            self.image_cache = ImageCache(max_size=1000)
+        if self.war_image_cache is None:
+            self.war_image_cache = ImageCache(max_size=800)
     
     # Add property for save_file_text
     @property
@@ -1584,7 +1591,7 @@ class CBTypesParser:
 
 class ImageCache:
     """Cache for images to improve performance."""
-    def __init__(self, max_size: int = 1000):
+    def __init__(self, max_size: int = 1000):  # ADD THIS
         self.cache = {}
         self.max_size = max_size
         self.access_order = []
@@ -2276,39 +2283,19 @@ class LayerCache:
                     self.cache[tab_name].append((photo, layer["position"]))
     
     def _process_layer(self, layer: Dict) -> Optional[Image.Image]:
-        """Process a single layer definition with dual cache system."""
+        """Process a single layer definition - ALWAYS use main cache for UI."""
         rel_path = os.path.join("gfx", "interface", layer["path"])
         full_path = self.state.get_modded_path(rel_path)
         
-        # Check if this is a UI element (should be persistent)
-        is_ui_element = any([
-            "politics_tab_button.dds" in layer["path"],
-            "tab_button" in layer["path"],
-            "button_standard" in layer["path"],
-            "main_bg.dds" in layer["path"],
-            "diplomacy_bg.dds" in layer["path"]
-        ])
-        
-        if is_ui_element:
-            # UI elements go to MAIN cache (persistent)
-            cache_key = f"layer_{layer['path']}"
-            cached_img = self.state.image_cache.get(cache_key)
-            if cached_img:
-                img = cached_img
-            else:
-                img = SafeLoader.safe_load_image(full_path)
-                if img:
-                    self.state.image_cache.set(cache_key, img)
+        # ALL LAYERS GO TO MAIN CACHE (persistent UI elements)
+        cache_key = f"layer_{layer['path']}"
+        cached_img = self.state.image_cache.get(cache_key)
+        if cached_img:
+            img = cached_img
         else:
-            # Other layers go to WAR cache (clearable)
-            cache_key = f"layer_{layer['path']}"
-            cached_img = self.state.war_image_cache.get(cache_key)
-            if cached_img:
-                img = cached_img
-            else:
-                img = SafeLoader.safe_load_image(full_path)
-                if img:
-                    self.state.war_image_cache.set(cache_key, img)
+            img = SafeLoader.safe_load_image(full_path)
+            if img:
+                self.state.image_cache.set(cache_key, img)  # Always main cache
         
         if not img:
             return None
@@ -2630,15 +2617,26 @@ class WarAnalyzerGUI:
             last_file = self.state.config.recent_files[0]
             if os.path.exists(last_file):
                 self.state.save_file_path = last_file
-                # Update the save label if it exists
+                # Update the save label if it exists - WITH FORMATTING
                 if hasattr(self, 'save_label'):
-                    self.save_label.config(text=self.state.save_file_path)
+                    filename = os.path.basename(last_file)
+                    folder1 = os.path.basename(os.path.dirname(last_file))  # Immediate parent
+                    folder2 = os.path.basename(os.path.dirname(os.path.dirname(last_file)))  # Grandparent
+                    display_name = f"{folder2}/{folder1}/{filename}"
+                    self.save_label.config(text=display_name)
 
     def _load_recent_file(self, file_path):
         """Load a file from the recent files list."""
         if os.path.exists(file_path):
             self.state.save_file_path = file_path
-            self.save_label.config(text=self.state.save_file_path)
+            
+            # Apply the same path formatting
+            filename = os.path.basename(file_path)
+            folder1 = os.path.basename(os.path.dirname(file_path))  # Immediate parent
+            folder2 = os.path.basename(os.path.dirname(os.path.dirname(file_path)))  # Grandparent
+            display_name = f"{folder2}/{folder1}/{filename}"
+            self.save_label.config(text=display_name)
+            
             # Move to top of recent files
             if file_path in self.state.config.recent_files:
                 self.state.config.recent_files.remove(file_path)
@@ -3266,22 +3264,47 @@ class WarAnalyzerGUI:
                     self._draw_single_secondary_flag(flag_x_pos, flag_y_pos, tag, flag_overlay)
 
     def emergency_cleanup(self):
-        """Clean only war-specific images - keep it simple."""
+        """Selective memory cleanup - preserve UI elements."""
         import gc
         
-        # Clear ONLY the war-specific cache
-        war_items_cleared = len(self.state.war_image_cache.cache)
+        print("=== SELECTIVE CLEANUP START ===")
+        
+        # Debug: Show what's in caches before cleanup
+        main_cache_size = len(self.state.image_cache.cache)
+        war_cache_size = len(self.state.war_image_cache.cache)
+        image_refs_size = len(self.image_refs)
+        
+        print(f"Before cleanup - Main cache: {main_cache_size}, War cache: {war_cache_size}, Image refs: {image_refs_size}")
+        
+        # ONLY clear war cache (flags, battle images) - preserve main cache (UI elements)
+        war_cache_keys_before = list(self.state.war_image_cache.cache.keys())
         self.state.war_image_cache.clear()
+        
+        # Clear current tab's image references but preserve UI images
+        ui_images_to_keep = []
+        for ref in self.image_refs:
+            # Keep images that are UI elements (backgrounds, buttons, etc.)
+            # You might need to adjust this logic based on how you track UI images
+            if any(ui_key in str(ref) for ui_key in ['layer_', 'bg', 'button']):
+                ui_images_to_keep.append(ref)
+        
+        self.image_refs.clear()
+        self.image_refs.extend(ui_images_to_keep)
         
         # Clear war detail widgets only
         if hasattr(self, "_tab3_widgets"):
             self._tab3_widgets.clear()
         
+        # Force garbage collection
         gc.collect()
-
+        
+        print(f"After cleanup - Cleared war cache ({len(war_cache_keys_before)} items), preserved main cache")
+        print("=== SELECTIVE CLEANUP COMPLETE ===")
+        
     def _load_country_flag_for_display(self, tag: str, circular: bool = False, gp_size: bool = False) -> Optional[Image.Image]:
-        """Load flag image for display with appropriate overlay - FIXED CACHE."""
-        if not tag or tag == "---":
+        """Load flag with aggressive memory limits."""
+        # Don't load flags if we're switching away from war details
+        if len(self.image_refs) > 500:  # If we have too many images already
             return None
         
         cache_key = f"flag_{tag}_gp" if (circular and gp_size) else f"flag_{tag}_circular" if circular else f"flag_{tag}"
@@ -4464,6 +4487,7 @@ class WarAnalyzerGUI:
             # Convert background to PhotoImage and add to canvas
             bg_photo = ImageTk.PhotoImage(composite)
             self.image_refs.append(bg_photo)
+            #self.current_page_images.append(bg_photo)  # TRACK FOR CLEANUP
             canvas.create_image(x, y, anchor=tk.CENTER, image=bg_photo)
             
             # Add percentage text with BMFont (separate layer)
@@ -4486,13 +4510,15 @@ class WarAnalyzerGUI:
                 # Convert text to PhotoImage
                 text_photo = ImageTk.PhotoImage(text_image)
                 self.image_refs.append(text_photo)
+                #self.current_page_images.append(text_photo)  # TRACK FOR CLEANUP
                 
                 # Add text as separate layer above background (same position)
                 canvas.create_image(x, y, anchor=tk.CENTER, image=text_photo)
 
     def _draw_war_details_tab(self):
-        """Draw the war details tab with compact layout."""
-        # Clean up any previous tab3 widgets
+        """Draw the war details tab with memory tracking."""
+        # Track how many images we create in this tab
+        start_image_count = len(self.image_refs)
         if hasattr(self, "_tab3_widgets"):
             for wid in self._tab3_widgets:
                 try:
@@ -4917,6 +4943,9 @@ class WarAnalyzerGUI:
                 no_battles_id = self.canvas.create_image(detail_x, summary_y_position + 50, anchor=tk.NW, image=no_battles_photo)
                 self._tab3_widgets.append(no_battles_id)
 
+        end_image_count = len(self.image_refs)
+        print(f"War details tab created {end_image_count - start_image_count} new images")
+
     def _calculate_land_statistics(self, war: War) -> Dict:
         """Calculate land battle statistics - ONLY COUNTING LAND UNITS."""
         # Load unit types to properly identify land battles
@@ -5266,18 +5295,7 @@ class WarAnalyzerGUI:
         return sharpness
     
     def _draw_tabs(self):
-        """Draw tab buttons - ensure they're always on top."""
-        if not hasattr(self, 'tab_canvases'):
-            self.tab_canvases = []
-        else:
-            # Clean up old tab canvases
-            for canvas in self.tab_canvases:
-                try:
-                    canvas.destroy()
-                except:
-                    pass
-            self.tab_canvases = []
-        
+        """Draw tab buttons directly on the main canvas."""
         tab_width = 144
         tab_height = 25
         baseline_y = 2
@@ -5286,12 +5304,6 @@ class WarAnalyzerGUI:
             x = 29 + i * (tab_width + 16)
             y = 23
 
-            # Create canvas for this tab
-            tab_canvas = tk.Canvas(self.canvas, width=tab_width, height=tab_height, 
-                                bg=BG_COLOR, borderwidth=0, highlightthickness=0)
-            
-            self.tab_canvases.append(tab_canvas)
-            
             # Render text using BMFont
             text = tab_data["label"]
             text_image = self.font_manager.render_text(text, size=22, color="black")
@@ -5305,39 +5317,65 @@ class WarAnalyzerGUI:
                 text_content_width = bbox[2] - bbox[0]
                 text_content_center_x = bbox[0] + (text_content_width // 2)
                 content_offset_x = (text_image.width // 2) - text_content_center_x
-                text_x = (tab_width // 2) + content_offset_x
+                
+                # Calculate centered position
+                text_x = x + (tab_width // 2) + content_offset_x
             else:
-                text_x = tab_width // 2
+                text_x = x + (tab_width // 2)
             
             # Convert text to PhotoImage
             text_photo = ImageTk.PhotoImage(text_image)
             self.image_refs.append(text_photo)
             
-            # Add text to canvas
-            text_y = baseline_y
-            tab_canvas.create_image(text_x, text_y, anchor=tk.N, image=text_photo)
+            # Add text directly to the main canvas (no separate canvas)
+            text_y = y + baseline_y
+            text_id = self.canvas.create_image(text_x, text_y, anchor=tk.N, image=text_photo, tags=(f"tab_{key}", "tab_text"))
             
-            # Make canvas clickable
-            tab_canvas.bind("<Button-1>", lambda e, k=key: self._on_tab_click(k))
-            tab_canvas.configure(cursor="hand2")
+            # Make the text clickable
+            self.canvas.tag_bind(text_id, "<Button-1>", lambda e, k=key: self._on_tab_click(k))
             
-            # Place the tab canvas on the main canvas
-            window_id = self.canvas.create_window(x, y, anchor=tk.NW, window=tab_canvas, tags=(f"tab_{key}",))
-            
-            # CRITICAL: Force this window to always be on top
-            self.canvas.tag_raise(window_id)
+            # Add a clickable area around the text (optional, for better UX)
+            click_padding = 10
+            click_area = self.canvas.create_rectangle(
+                x - click_padding, y - click_padding,
+                x + tab_width + click_padding, y + tab_height + click_padding,
+                outline="", fill="", tags=(f"tab_{key}", "tab_clickable")
+            )
+            self.canvas.tag_bind(click_area, "<Button-1>", lambda e, k=key: self._on_tab_click(k))
     
     def _draw_tab_content(self, tab_name: str):
-        """Draw content for a specific tab - tabs drawn LAST."""
-        # Clean up previous content
-        self.canvas.delete("all")
-        if hasattr(self, "_tab3_widgets"):
-            self._tab3_widgets.clear()
-        
-        # Clear image references
-        self.image_refs.clear()
-        
-        # Draw the tab content FIRST (backgrounds, etc.)
+        """Draw content for a specific tab with selective cleanup."""
+        # SELECTIVE CLEANUP - preserve UI elements
+        try:
+            # Delete all canvas items EXCEPT UI elements
+            all_items = self.canvas.find_all()
+            for item in all_items:
+                tags = self.canvas.gettags(item)
+                # Keep items tagged as UI, delete others
+                if not any(tag in ['ui', 'background', 'tab'] for tag in tags):
+                    self.canvas.delete(item)
+            
+            # Clear only war detail widgets
+            if hasattr(self, "_tab3_widgets"):
+                self._tab3_widgets.clear()
+            
+            # Clear current tab's temporary image references but preserve UI images
+            current_refs = self.image_refs.copy()
+            self.image_refs.clear()
+            
+            # Keep UI-related images
+            for ref in current_refs:
+                if any(ui_key in str(ref) for ui_key in ['layer_', 'bg_', 'button_']):
+                    self.image_refs.append(ref)
+            
+            # Only do emergency cleanup when switching FROM war details
+            if self.current_tab == "Tab3":
+                self.emergency_cleanup()
+            
+        except Exception as e:
+            print(f"Cleanup error: {e}")
+
+        # Now draw new content - layers should still be cached
         layer_items = self.layer_cache.get(tab_name)
         if layer_items:
             for photo, pos in layer_items:
@@ -5347,16 +5385,14 @@ class WarAnalyzerGUI:
                 except Exception:
                     pass
 
-        # Draw the specific tab content
+        self._draw_tabs()
+
         if tab_name == "Tab1":
             self._draw_settings_tab()
         elif tab_name == "Tab2":
             self._draw_wars_tab()
         elif tab_name == "Tab3":
             self._draw_war_details_tab()
-        
-        # Draw tabs LAST so they appear on top of everything
-        self._draw_tabs()
 
     def _clear_mod_caches(self):
         """Clear all caches that contain mod-specific data."""
@@ -5526,10 +5562,10 @@ class WarAnalyzerGUI:
                 recent_y += 25
     
     def _draw_wars_tab(self):
-        """Draw the wars list tab - final version."""
+        """Draw the wars list tab with pagination."""
         self._rebuild_filtered_wars()
         
-        # War list
+        # War list with pagination
         war_list = WarList(self.canvas, self.root, self.state, self.scrollbar_assets, 
                         self.font_manager, self.image_refs, self._on_tab_click, self)
         war_list.create(self.state.filtered_wars)
@@ -5542,6 +5578,18 @@ class WarAnalyzerGUI:
                                     self.scrollbar_assets, self.image_refs, 
                                     self._rebuild_and_refresh, self)
         country_filter.create()
+
+    def _rebuild_and_refresh(self):
+        """Rebuild filtered wars and refresh the display with pagination reset."""
+        self._rebuild_filtered_wars()
+        
+        # Reset to first page when filters change
+        if hasattr(self, 'war_list'):
+            self.war_list.current_page = 0
+            self.war_list.all_wars = self.state.filtered_wars
+            self.war_list._load_current_page()
+        else:
+            self._draw_tab_content("Tab2")
 
     def _raise_tabs_to_top(self):
         """Force tab canvases to top z-order."""
@@ -5847,38 +5895,198 @@ class WarAnalyzerGUI:
             pass
 
 
+import weakref
+
 class WarList:
-    """Renders the scrollable list of wars."""
-    
     def __init__(self, parent_canvas, root, state, scrollbar_assets, font_manager, image_refs, on_war_select, gui=None):
         self.parent_canvas = parent_canvas
         self.root = root
         self.state = state
         self.sb_assets = scrollbar_assets
         self.font_manager = font_manager
-        self.image_refs = image_refs
+        self.main_image_refs = image_refs
         self.on_war_select = on_war_select
         self.gui = gui
-    
-    def create(self, wars: List[War]):
-        """Create the war list with memory management."""
-        # Clear previous images first
-        self.image_refs.clear()
         
-        scrollable = ScrollableList(self.parent_canvas, self.root, self.state, WAR_LIST_X, WAR_LIST_Y, 
-                                WAR_LIST_WIDTH, WAR_LIST_HEIGHT, self.sb_assets, row_height=56)
-        scrollable.create()
+        # Pagination variables
+        self.current_page = 0
+        self.wars_per_page = 200
+        self.all_wars = []
+        self.scrollable = None
+        self.navigation_frame = None
+        self.flag_photo_cache = {}
+        self.current_page_image_refs = []  # Track current page images
+        self.current_canvas_items = []     # Track canvas items to delete
+
+    def _load_current_page(self):
+        """Load and display the current page of wars with proper image cleanup."""
+        if not self.scrollable or not self.scrollable.frame_inside:
+            return
+            
+        # Clear the current display
+        for widget in self.scrollable.frame_inside.winfo_children():
+            widget.destroy()
         
-        # Load assets
+        # PROPERLY DESTROY PREVIOUS PAGE'S IMAGES
+        for img_ref in self.current_page_image_refs:
+            if img_ref in self.main_image_refs:
+                self.main_image_refs.remove(img_ref)
+            # PROPER WAY: Let garbage collection handle it after removing references
+            # Just remove the reference and let GC do its job
+        
+        self.current_page_image_refs.clear()
+        self.flag_photo_cache.clear()
+        self.state.war_image_cache.clear()
+        
+        # Force garbage collection MULTIPLE TIMES
+        import gc
+        for i in range(3):  # Multiple passes
+            gc.collect()
+            self.root.update()  # Give tkinter time to process
+        
+        # Calculate range for current page
+        start_idx = self.current_page * self.wars_per_page
+        end_idx = min(start_idx + self.wars_per_page, len(self.all_wars))
+        current_wars = self.all_wars[start_idx:end_idx]
+        
+        # Load assets for current page only
         overlay_path = self.state.get_modded_path(os.path.join("gfx", "interface", "flag_overlay_new.tga"))
         flag_overlay = SafeLoader.safe_load_image(overlay_path, size=(FLAG_WIDTH, FLAG_HEIGHT))
         
         bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "diplo_war_entrybg.dds"))
         entry_bg = SafeLoader.safe_load_image(bg_path)
         
-        # REMOVE THE LIMIT - render all wars
-        for idx, war in enumerate(wars):
-            self._draw_war_row(scrollable.frame_inside, war, idx, flag_overlay, entry_bg)
+        # Store references to assets for this page
+        if flag_overlay:
+            flag_photo = ImageTk.PhotoImage(flag_overlay)
+            self.main_image_refs.append(flag_photo)
+            self.current_page_image_refs.append(flag_photo)
+        
+        if entry_bg:
+            entry_photo = ImageTk.PhotoImage(entry_bg)
+            self.main_image_refs.append(entry_photo)
+            self.current_page_image_refs.append(entry_photo)
+        
+        # Render current page wars WITH ALL GRAPHICS
+        for idx, war in enumerate(current_wars):
+            absolute_idx = start_idx + idx
+            self._draw_war_row(self.scrollable.frame_inside, war, absolute_idx, flag_overlay, entry_bg)
+        
+        # Update navigation
+        self._update_navigation_display()
+        
+        print(f"Loaded page {self.current_page + 1}: wars {start_idx + 1}-{end_idx} (Images: {len(self.current_page_image_refs)})")
+
+    def create(self, wars: List[War]):
+        """Create the war list with pagination controls."""
+        self.all_wars = wars
+        
+        # Create scrollable area
+        self.scrollable = ScrollableList(self.parent_canvas, self.root, self.state, WAR_LIST_X, WAR_LIST_Y, 
+                                WAR_LIST_WIDTH, WAR_LIST_HEIGHT, self.sb_assets, row_height=56)
+        self.scrollable.create()
+        
+        # Create navigation controls
+        self._create_navigation_controls()
+        
+        # Load first page
+        self._load_current_page()
+
+    def _create_navigation_controls(self):
+        """Create pagination navigation buttons below the war list."""
+        # Position navigation below the war list
+        nav_y = WAR_LIST_Y + WAR_LIST_HEIGHT
+        
+        # Create frame for navigation
+        self.navigation_frame = tk.Frame(self.root, bg=BG_COLOR)
+        self.parent_canvas.create_window(WINDOW_WIDTH // 2, nav_y, anchor=tk.N, window=self.navigation_frame)
+        
+        # Update navigation display
+        self._update_navigation_display()
+
+    def _update_navigation_display(self):
+        """Update the navigation controls with current page info and buttons."""
+        if not self.navigation_frame:
+            return
+            
+        # Clear existing widgets
+        for widget in self.navigation_frame.winfo_children():
+            widget.destroy()
+        
+        total_pages = (len(self.all_wars) + self.wars_per_page - 1) // self.wars_per_page
+        current_start = self.current_page * self.wars_per_page + 1
+        current_end = min((self.current_page + 1) * self.wars_per_page, len(self.all_wars))
+        
+        # Create a single canvas to draw everything with zero padding
+        nav_canvas = tk.Canvas(self.navigation_frame, height=14, bg=BG_COLOR, 
+                            highlightthickness=0, borderwidth=0)
+        nav_canvas.pack(fill=tk.X)
+        
+        # Calculate positions
+        x_pos = 0
+        y_pos = 7  # Middle of 14px height
+        
+        # Page info
+        info_text = f"Wars {current_start}-{current_end} of {len(self.all_wars)}"
+        info_id = nav_canvas.create_text(x_pos, y_pos, text=info_text, anchor=tk.W, 
+                                    font=("Arial", 8), fill="black")
+        x_pos += nav_canvas.bbox(info_id)[2] + 8  # Move right after text
+        
+        # Previous button
+        prev_text = "◀ Previous"
+        prev_id = nav_canvas.create_text(x_pos, y_pos, text=prev_text, anchor=tk.W,
+                                    font=("Arial", 8), fill="blue")
+        prev_bbox = nav_canvas.bbox(prev_id)
+        
+        if self.current_page > 0:
+            nav_canvas.tag_bind(prev_id, "<Button-1>", lambda e: self._load_previous_page())
+            nav_canvas.configure(cursor="hand2")
+        else:
+            nav_canvas.itemconfig(prev_id, fill="gray")
+        
+        x_pos += prev_bbox[2] - prev_bbox[0] + 8  # Move right
+        
+        # Page indicator
+        page_text = f"Page {self.current_page + 1}/{total_pages}"
+        page_id = nav_canvas.create_text(x_pos, y_pos, text=page_text, anchor=tk.W,
+                                    font=("Arial", 8), fill="black")
+        x_pos += nav_canvas.bbox(page_id)[2] - nav_canvas.bbox(page_id)[0] + 8  # Move right
+        
+        # Next button
+        next_text = "Next ▶"
+        next_id = nav_canvas.create_text(x_pos, y_pos, text=next_text, anchor=tk.W,
+                                    font=("Arial", 8), fill="blue")
+        
+        if self.current_page < total_pages - 1:
+            nav_canvas.tag_bind(next_id, "<Button-1>", lambda e: self._load_next_page())
+        else:
+            nav_canvas.itemconfig(next_id, fill="gray")
+
+
+    def _preload_page_flags(self, wars: List[War]):
+        """Preload flags for the current page only."""
+        common_tags = set()
+        for war in wars:
+            # Only preload flags for first few participants to avoid excessive loading
+            common_tags.update(war.attackers[:2])
+            common_tags.update(war.defenders[:2])
+        
+        # for tag in common_tags:
+        #     if tag and tag != "---":
+        #         self._load_country_flag_for_display(tag)
+
+    def _load_previous_page(self):
+        """Load the previous page of wars."""
+        if self.current_page > 0:
+            self.current_page -= 1
+            self._load_current_page()
+
+    def _load_next_page(self):
+        """Load the next page of wars."""
+        total_pages = (len(self.all_wars) + self.wars_per_page - 1) // self.wars_per_page
+        if self.current_page < total_pages - 1:
+            self.current_page += 1
+            self._load_current_page()
 
     def _determine_background_crop(self, war: War) -> str:
         """Determine which part of the background to crop based on player involvement and war status."""
@@ -5925,10 +6133,12 @@ class WarList:
         return None
 
     def _draw_war_row(self, parent, war: War, index: int, flag_overlay: Optional[Image.Image], entry_bg: Optional[Image.Image]):
-        """Draw a single war row with dynamic background based on player involvement and war status."""
-        # Create frame with transparent background
+        """Draw a single war row and store reference."""
         row = tk.Frame(parent, bg=BG_COLOR, height=56)
         row.pack(fill="x", pady=0)
+        
+        # Store the row frame so we can remove it later
+        war.row_frame = row
         
         # Create canvas with transparent background
         row_canvas = tk.Canvas(row, width=600, height=56, highlightthickness=0, bg=BG_COLOR)
@@ -5959,7 +6169,8 @@ class WarList:
             
             bg_small = row_bg.resize((600, 56), Image.Resampling.NEAREST)
             photo = ImageTk.PhotoImage(bg_small)
-            self.image_refs.append(photo)
+            self.main_image_refs.append(photo)  # CHANGED: main_image_refs instead of image_refs
+            self.current_page_image_refs.append(photo)  # TRACK FOR CLEANUP
             row_canvas.create_image(0, 0, anchor="nw", image=photo)
         
         # Title (already transparent)
@@ -5990,35 +6201,21 @@ class WarList:
         attacker_army_str = format_army_size(total_attacker_army)
         defender_army_str = format_army_size(total_defender_army)
 
-        # Draw attacker army size (left of war score) using BMFont
-        attacker_text_img = self.font_manager.render_text(attacker_army_str, size=12, color="black")
-        if attacker_text_img:
-            # Crop transparent padding for proper centering
-            bbox = attacker_text_img.getbbox()
-            if bbox:
-                attacker_text_img = attacker_text_img.crop(bbox)
-            attacker_photo = ImageTk.PhotoImage(attacker_text_img)
-            self.image_refs.append(attacker_photo)
-            row_canvas.create_image(170, 40, anchor=tk.CENTER, image=attacker_photo)  # Left of war score
+        # Draw attacker army size (left of war score) using normal text
+        row_canvas.create_text(170, 40, text=attacker_army_str, anchor=tk.CENTER, 
+                            font=("Arial", 8), fill="black")
 
-        # Draw defender army size (right of war score) using BMFont
-        defender_text_img = self.font_manager.render_text(defender_army_str, size=12, color="black")
-        if defender_text_img:
-            # Crop transparent padding for proper centering
-            bbox = defender_text_img.getbbox()
-            if bbox:
-                defender_text_img = defender_text_img.crop(bbox)
-            defender_photo = ImageTk.PhotoImage(defender_text_img)
-            self.image_refs.append(defender_photo)
-            row_canvas.create_image(429, 40, anchor=tk.CENTER, image=defender_photo)  # Right of war score
+        # Draw defender army size (right of war score) using normal text  
+        row_canvas.create_text(429, 40, text=defender_army_str, anchor=tk.CENTER,
+                            font=("Arial", 8), fill="black")
         
         # Draw war score visualization in center (original size with overlay)
         war_score = stats.war_score_estimate
         self.gui._draw_war_score(row_canvas, war_score, 300, 40)
         
-        # Flags - update to use the advanced method
-        self._draw_war_list_flags_advanced(row_canvas, war.attackers, 10, 8, "left", war.original_attacker, flag_overlay)
-        self._draw_war_list_flags_advanced(row_canvas, war.defenders, 590, 8, "right", war.original_defender, flag_overlay)
+        # Flags - use the original method
+        self._draw_war_list_flags(row_canvas, war.attackers, 10, 8, "left", war.original_attacker, flag_overlay)
+        self._draw_war_list_flags(row_canvas, war.defenders, 590, 8, "right", war.original_defender, flag_overlay)
         
         # Draw CB icon - RESTORE ORIGINAL SIZE
         if war.goals and self.gui:
@@ -6037,7 +6234,8 @@ class WarList:
                     cb_icon = cb_icon.resize((24, 24), Image.Resampling.LANCZOS)
                     
                     photo_icon = ImageTk.PhotoImage(cb_icon)
-                    self.image_refs.append(photo_icon)
+                    self.main_image_refs.append(photo_icon)  # CHANGED: main_image_refs instead of image_refs
+                    self.current_page_image_refs.append(photo_icon)  # TRACK FOR CLEANUP
                     
                     # Position below the first attacker flag
                     row_canvas.create_image(19, 40, anchor=tk.CENTER, image=photo_icon)
@@ -6067,7 +6265,7 @@ class WarList:
         
         # Convert text to PhotoImage
         text_photo = ImageTk.PhotoImage(text_image)
-        self.image_refs.append(text_photo)
+        self.main_image_refs.append(text_photo)
         
         # Calculate centered position for text
         text_x = 100 + (400 // 2)  # 100 (left offset) + half of 400 width
@@ -6168,7 +6366,7 @@ class WarList:
             self._draw_single_war_list_flag(canvas, tag, x, yy, flag_overlay)
 
     def _draw_single_war_list_flag(self, canvas, tag: str, x: int, y: int, overlay: Optional[Image.Image]):
-        """Draw a single country flag with transparent background in war list."""
+        """Draw a single country flag WITHOUT CACHE to prevent memory leaks."""
         flag = self._load_flag(tag)
         if not flag:
             return
@@ -6182,9 +6380,86 @@ class WarList:
         if overlay:
             composite.alpha_composite(overlay)
         
+        # DON'T CACHE - create new PhotoImage every time
         photo = ImageTk.PhotoImage(composite)
-        self.image_refs.append(photo)
+        self.main_image_refs.append(photo)
+        self.current_page_image_refs.append(photo)
         canvas.create_image(x, y, anchor="nw", image=photo)
+
+    def _draw_single_flag(self, canvas, tag: str, x: int, y: int, overlay: Optional[Image.Image]):
+        """Draw a single country flag."""
+        flag = self._load_flag(tag)
+        if not flag:
+            return
+        
+        flag = flag.resize((FLAG_WIDTH, FLAG_HEIGHT), Image.Resampling.LANCZOS)
+        
+        if overlay:
+            flag = flag.copy()
+            flag.alpha_composite(overlay)
+        
+        photo = ImageTk.PhotoImage(flag)
+        self.main_image_refs.append(photo)  # CHANGED: main_image_refs instead of image_refs
+        self.current_page_image_refs.append(photo)  # TRACK FOR CLEANUP
+        canvas.create_image(x, y, anchor="nw", image=photo)
+
+    def _draw_flags(self, canvas, tags: List[str], x_anchor: int, y: int, side: str, highlight: Optional[str], flag_overlay: Optional[Image.Image]):
+        """Draw flags for a list of country tags."""
+        tags = [t for t in tags if t and t != "---"]
+        if not tags:
+            return
+        
+        ordered = list(tags)
+        if highlight in ordered:
+            ordered.remove(highlight)
+            ordered.insert(0, highlight)
+        
+        num_tags = len(ordered)
+        if num_tags <= 5:
+            step = 24
+        elif num_tags <= 9:
+            step = 14
+        else:
+            step = 12
+        
+        total_width = (num_tags - 1) * step + FLAG_WIDTH
+        x_start = x_anchor if side == "left" else (x_anchor - total_width)
+        
+        positions = [(tag, x_start + i * step, y) for i, tag in enumerate(ordered)]
+        
+        for tag, x, yy in [p for p in positions if p[0] != highlight]:
+            self._draw_single_flag(canvas, tag, x, yy, flag_overlay)
+        
+        if highlight and any(tag == highlight for tag, _, _ in positions):
+            tag, x, yy = next(p for p in positions if p[0] == highlight)
+            self._draw_single_flag(canvas, tag, x, yy, flag_overlay)
+
+
+    def _load_flag(self, tag: str) -> Optional[Image.Image]:
+        """Load flag image for a country tag."""
+        if not tag or tag == "---":
+            return None
+        
+        cache_key = f"flag_{tag}"
+        cached_flag = self.state.image_cache.get(cache_key)
+        if cached_flag:
+            return cached_flag
+        
+        gov_name = self.state.country_governments.get(tag)
+        if gov_name:
+            flag_type = self.state.gov_to_flagtype.get(gov_name)
+            if flag_type:
+                variant_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}_{flag_type}.tga"))
+                flag = SafeLoader.safe_load_image(variant_path)
+                if flag:
+                    self.state.image_cache.set(cache_key, flag)
+                    return flag
+        
+        base_path = self.state.get_modded_path(os.path.join("gfx", "flags", f"{tag}.tga"))
+        flag = SafeLoader.safe_load_image(base_path)
+        if flag:
+            self.state.image_cache.set(cache_key, flag)
+        return flag
     
     def _draw_flags(self, canvas, tags: List[str], x_anchor: int, y: int, side: str, highlight: Optional[str], flag_overlay: Optional[Image.Image]):
         """Draw flags for a list of country tags."""
@@ -6217,21 +6492,6 @@ class WarList:
             tag, x, yy = next(p for p in positions if p[0] == highlight)
             self._draw_single_flag(canvas, tag, x, yy, flag_overlay)
     
-    def _draw_single_flag(self, canvas, tag: str, x: int, y: int, overlay: Optional[Image.Image]):
-        """Draw a single country flag."""
-        flag = self._load_flag(tag)
-        if not flag:
-            return
-        
-        flag = flag.resize((FLAG_WIDTH, FLAG_HEIGHT), Image.Resampling.LANCZOS)
-        
-        if overlay:
-            flag = flag.copy()
-            flag.alpha_composite(overlay)
-        
-        photo = ImageTk.PhotoImage(flag)
-        self.image_refs.append(photo)
-        canvas.create_image(x, y, anchor="nw", image=photo)
     
     def _load_flag(self, tag: str) -> Optional[Image.Image]:
         """Load flag image for a country tag."""
