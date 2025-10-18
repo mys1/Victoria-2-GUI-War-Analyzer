@@ -1,6 +1,6 @@
 # Prerequisites
 
-You need ![python](https://apps.microsoft.com/detail/9pnrbtzxmb4z?) installed first and the python library PIL.
+You need [python](https://apps.microsoft.com/detail/9pnrbtzxmb4z?) installed first and the python library PIL.
 
 PIL is installed in the Windows terminal after Python is installed.
 ```
@@ -8,7 +8,7 @@ pip install pillow
 ```
 # Downloading
 
-Right click and save the raw file: ![Victoria 2 GUI war analyzer.py](</Victoria 2 GUI war analyzer.py?raw=true>)
+Right click and save the raw file: [Victoria 2 GUI war analyzer.py](</Victoria 2 GUI war analyzer.py?raw=true>)
 
 # Running the app
 
