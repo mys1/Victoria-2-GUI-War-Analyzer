@@ -57,4 +57,4 @@ If a general or admiral has died it's not possible to see what + or - attributes
 
 # Bugs and crashes
 
-It's pretty stable but not perfect, I'm not a coder so I don't know what I'm doing. Feel free to find improvements. Crashes most often happens if you watch too many wars without cloing the app in between.
+It's pretty stable but not perfect, I'm not a coder so I don't know what I'm doing. Feel free to find improvements. Crashes most often happens if you watch too many wars without closing the app in between.
