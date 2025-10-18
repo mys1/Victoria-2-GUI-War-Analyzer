@@ -12,7 +12,7 @@ Right click and save the raw file: [Victoria 2 GUI war analyzer.py](</Victoria 2
 
 # Running the app
 
-It should be as easy as double-clicing the file. After starting the app you will be prompted to select the installation folder for Victoria 2, this is because this app comes without any graphical elements and only uses what comes with the game.
+It should be as easy as double clicking the file. After starting the app you will be prompted to select the installation folder for Victoria 2, this is because this app comes without any graphical elements and only uses what comes with the game.
 
 ## Settings
 
