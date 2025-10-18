@@ -23,7 +23,7 @@ Choose your save file and the corresponding folder if the save is from a MOD. Th
 ## Show wars
 
 You will be presented with a list of the wars from the save file, because of instability issues it only shows 200 at a time. Wars highlighted in gold are the wars where the player is involved.
-The overview of the war here shows the flags of the countries involved. The icon of the original casus belli of the war, the total number of soldiers on both sides that have been involved in battles. A war score calculated based on battles won and casualties, war scoress of old wars are not stored in the save file so this is a made up calculation that does indicate 100% what side actually won the war.
+The overview of the war here shows the flags of the countries involved. The icon of the original casus belli of the war, the total number of soldiers on both sides that have been involved in battles. A war score calculated based on battles won and casualties, war scores of old wars are not stored in the save file so this is a made up calculation that does indicate 100% what side actually won the war.
 
 ![Show wars](/images/show_wars1.png)
 
