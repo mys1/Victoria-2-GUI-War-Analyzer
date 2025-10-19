@@ -369,9 +369,6 @@ class AppState:
 class ModManager:
     """Manages multiple mod loading order and file resolution."""
     
-class ModManager:
-    """Manages multiple mod loading order and file resolution."""
-    
     @staticmethod
     def get_available_mods(vic2_path: str) -> List[str]:
         """Get list of available mods by reading all folders in the mod directory."""
@@ -2754,6 +2751,19 @@ class WarAnalyzerGUI:
         self.root.title("Victoria 2 GUI War Analyzer")
         self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
         self.root.resizable(False, False)
+        
+        # Use your existing mod-aware path resolution
+        vic2_icon_path = self.state.get_modded_path("Victoria2.ico")
+        if os.path.exists(vic2_icon_path):
+            self.root.iconbitmap(vic2_icon_path)
+        else:
+            # Fallback: try the base Victoria 2 directory
+            base_icon_path = os.path.join(self.state.vic2_path, "Victoria2.ico")
+            if os.path.exists(base_icon_path):
+                self.root.iconbitmap(base_icon_path)
+            else:
+                print("Victoria2.ico not found in any location")
+        
         self.state.config = AppConfig.load()
         self.canvas = tk.Canvas(self.root, width=WINDOW_WIDTH, height=WINDOW_HEIGHT, highlightthickness=0)
         self.canvas.pack()
@@ -5637,6 +5647,16 @@ class WarAnalyzerGUI:
             selection_dialog.grab_set()
             selection_dialog.configure(bg=BG_COLOR)
             selection_dialog.resizable(False, False)  # Prevent resizing
+            
+            # ADD THIS: Set icon for the Mod Manager window
+            vic2_icon_path = self.state.get_modded_path("Victoria2.ico")
+            if os.path.exists(vic2_icon_path):
+                selection_dialog.iconbitmap(vic2_icon_path)
+            else:
+                # Fallback: try the base Victoria 2 directory
+                base_icon_path = os.path.join(self.state.vic2_path, "Victoria2.ico")
+                if os.path.exists(base_icon_path):
+                    selection_dialog.iconbitmap(base_icon_path)
             
             # Create canvas for background and graphics - exactly 700x468
             canvas = tk.Canvas(selection_dialog, width=700, height=468, highlightthickness=0, bg=BG_COLOR)
