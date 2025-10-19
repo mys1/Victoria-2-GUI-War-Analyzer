@@ -4784,21 +4784,15 @@ class WarAnalyzerGUI:
         land_battles_count = len(land_stats['land_battles'])
         attacker_land_wins_count = land_stats['attacker_land_wins']
         defender_land_wins_count = land_stats['defender_land_wins']
-        total_count = 0
-        for battle in war.battles:
-            attacker_units = battle.attacker.get('units', {})
-            defender_units = battle.defender.get('units', {})
-            
-            # Count only land units
-            for unit_type, count in attacker_units.items():
-                unit_category = self._unit_types.get(unit_type, 'infantry')
-                if UnitTypeClassifier.is_land_unit(unit_category):
-                    total_count += count
-            
-            for unit_type, count in defender_units.items():
-                unit_category = self._unit_types.get(unit_type, 'infantry')
-                if UnitTypeClassifier.is_land_unit(unit_category):
-                    total_count += count
+        # Calculate total forces using new commander-based method
+        if not hasattr(self, '_unit_types'):
+            self._unit_types = UnitTypeClassifier.load_unit_types(self.state)
+
+        # Calculate using new commander-based method
+        attacker_land, attacker_naval, defender_land, defender_naval, _, _ = self.calculate_total_army_size_by_country(war, self._unit_types)
+
+        # Total forces = all land and naval units from both sides
+        total_count = attacker_land + attacker_naval + defender_land + defender_naval
 
         # Calculate total casualties for both sides (LAND UNITS ONLY)
         casualties_count = 0
@@ -5257,76 +5251,277 @@ class WarAnalyzerGUI:
             'ship_crop_left': crop_left,
             'ship_crop_right': crop_right
         }
+    
+    def calculate_total_army_size_by_country(self, war: War, unit_types: Dict[str, str]):
+        """Track land and naval units separately by country-commander pairs."""
+        
+        # {country_tag: {commander_name: {land_peak, naval_peak}}}
+        country_commander_peaks = {}
+        # {country_tag: {commander_name: {land_survivors, naval_survivors}}}
+        country_commander_survivors = {}
+        
+        total_attacker_land = 0
+        total_attacker_naval = 0
+        total_defender_land = 0
+        total_defender_naval = 0
+        
+        sorted_battles = sorted(war.battles, key=lambda b: b.start_date if hasattr(b, 'start_date') else 0)
+        
+        for battle in sorted_battles:
+            # Process attacker
+            attacker_country = battle.attacker.get('country', 'UNK')
+            attacker_leader = battle.attacker.get('leader', 'Unknown')
+            attacker_units = battle.attacker.get('units', {})
+            attacker_losses = battle.attacker.get('losses', 0)
+            
+            # Calculate land and naval units separately
+            attacker_land_units = 0
+            attacker_naval_units = 0
+            
+            for unit_type, count in attacker_units.items():
+                unit_category = unit_types.get(unit_type, 'infantry')
+                if UnitTypeClassifier.is_land_unit(unit_category):
+                    attacker_land_units += count
+                elif UnitTypeClassifier.is_naval_unit(unit_category):
+                    attacker_naval_units += count
+            
+            # Calculate survivors (distribute losses proportionally)
+            total_attacker_units = attacker_land_units + attacker_naval_units
+            if total_attacker_units > 0:
+                land_loss_ratio = attacker_land_units / total_attacker_units
+                naval_loss_ratio = attacker_naval_units / total_attacker_units
+            else:
+                land_loss_ratio = 1.0
+                naval_loss_ratio = 0.0
+                
+            attacker_land_survivors = max(0, attacker_land_units - int(attacker_losses * land_loss_ratio))
+            attacker_naval_survivors = max(0, attacker_naval_units - int(attacker_losses * naval_loss_ratio))
+            
+            if attacker_country != 'UNK' and attacker_leader != "Unknown":
+                country_key = attacker_country
+                if country_key not in country_commander_peaks:
+                    country_commander_peaks[country_key] = {}
+                    country_commander_survivors[country_key] = {}
+                
+                current_land_peak = country_commander_peaks[country_key].get(attacker_leader, {}).get('land', 0)
+                current_naval_peak = country_commander_peaks[country_key].get(attacker_leader, {}).get('naval', 0)
+                last_land_survivors = country_commander_survivors[country_key].get(attacker_leader, {}).get('land', 0)
+                last_naval_survivors = country_commander_survivors[country_key].get(attacker_leader, {}).get('naval', 0)
+                
+                # Track land reinforcements
+                if attacker_land_units > last_land_survivors:
+                    new_land_reinforcements = attacker_land_units - last_land_survivors
+                    total_attacker_land += new_land_reinforcements
+                    if attacker_leader not in country_commander_peaks[country_key]:
+                        country_commander_peaks[country_key][attacker_leader] = {}
+                    country_commander_peaks[country_key][attacker_leader]['land'] = current_land_peak + new_land_reinforcements
+                
+                # Track naval reinforcements  
+                if attacker_naval_units > last_naval_survivors:
+                    new_naval_reinforcements = attacker_naval_units - last_naval_survivors
+                    total_attacker_naval += new_naval_reinforcements
+                    if attacker_leader not in country_commander_peaks[country_key]:
+                        country_commander_peaks[country_key][attacker_leader] = {}
+                    country_commander_peaks[country_key][attacker_leader]['naval'] = current_naval_peak + new_naval_reinforcements
+                
+                # Update survivors
+                if attacker_leader not in country_commander_survivors[country_key]:
+                    country_commander_survivors[country_key][attacker_leader] = {}
+                country_commander_survivors[country_key][attacker_leader]['land'] = attacker_land_survivors
+                country_commander_survivors[country_key][attacker_leader]['naval'] = attacker_naval_survivors
+            
+            # Process defender (similar logic)
+            defender_country = battle.defender.get('country', 'UNK')
+            defender_leader = battle.defender.get('leader', 'Unknown')
+            defender_units = battle.defender.get('units', {})
+            defender_losses = battle.defender.get('losses', 0)
+            
+            defender_land_units = 0
+            defender_naval_units = 0
+            
+            for unit_type, count in defender_units.items():
+                unit_category = unit_types.get(unit_type, 'infantry')
+                if UnitTypeClassifier.is_land_unit(unit_category):
+                    defender_land_units += count
+                elif UnitTypeClassifier.is_naval_unit(unit_category):
+                    defender_naval_units += count
+            
+            total_defender_units = defender_land_units + defender_naval_units
+            if total_defender_units > 0:
+                land_loss_ratio = defender_land_units / total_defender_units
+                naval_loss_ratio = defender_naval_units / total_defender_units
+            else:
+                land_loss_ratio = 1.0
+                naval_loss_ratio = 0.0
+                
+            defender_land_survivors = max(0, defender_land_units - int(defender_losses * land_loss_ratio))
+            defender_naval_survivors = max(0, defender_naval_units - int(defender_losses * naval_loss_ratio))
+            
+            if defender_country != 'UNK' and defender_leader != "Unknown":
+                country_key = defender_country
+                if country_key not in country_commander_peaks:
+                    country_commander_peaks[country_key] = {}
+                    country_commander_survivors[country_key] = {}
+                
+                current_land_peak = country_commander_peaks[country_key].get(defender_leader, {}).get('land', 0)
+                current_naval_peak = country_commander_peaks[country_key].get(defender_leader, {}).get('naval', 0)
+                last_land_survivors = country_commander_survivors[country_key].get(defender_leader, {}).get('land', 0)
+                last_naval_survivors = country_commander_survivors[country_key].get(defender_leader, {}).get('naval', 0)
+                
+                if defender_land_units > last_land_survivors:
+                    new_land_reinforcements = defender_land_units - last_land_survivors
+                    total_defender_land += new_land_reinforcements
+                    if defender_leader not in country_commander_peaks[country_key]:
+                        country_commander_peaks[country_key][defender_leader] = {}
+                    country_commander_peaks[country_key][defender_leader]['land'] = current_land_peak + new_land_reinforcements
+                
+                if defender_naval_units > last_naval_survivors:
+                    new_naval_reinforcements = defender_naval_units - last_naval_survivors
+                    total_defender_naval += new_naval_reinforcements
+                    if defender_leader not in country_commander_peaks[country_key]:
+                        country_commander_peaks[country_key][defender_leader] = {}
+                    country_commander_peaks[country_key][defender_leader]['naval'] = current_naval_peak + new_naval_reinforcements
+                
+                if defender_leader not in country_commander_survivors[country_key]:
+                    country_commander_survivors[country_key][defender_leader] = {}
+                country_commander_survivors[country_key][defender_leader]['land'] = defender_land_survivors
+                country_commander_survivors[country_key][defender_leader]['naval'] = defender_naval_survivors
+        
+        return total_attacker_land, total_attacker_naval, total_defender_land, total_defender_naval, country_commander_peaks, country_commander_survivors
 
     def _draw_side_military_stats(self, war: War, x: int, y: int, is_attacker: bool, 
                                 land_stats: Dict, naval_stats: Dict):
-        """Draw military statistics for one side (attacker or defender) - SEPARATING LAND AND NAVAL."""
-        # Load unit types to distinguish between land and naval units
+        """Calculate military statistics using commander-based reinforcement tracking"""
         if not hasattr(self, '_unit_types'):
             self._unit_types = UnitTypeClassifier.load_unit_types(self.state)
         
-        # Calculate side-specific statistics - SEPARATE LAND AND NAVAL
+        # Track each commander's cumulative reinforcements and survivors
+        commander_peak_units = {}  # {commander_name: total_men_served_under_this_commander}
+        commander_survivors = {}   # {commander_name: survivors_from_last_battle}
+        
         total_land_army = 0
-        total_land_losses = 0
         total_naval_ships = 0
+        total_land_losses = 0
         total_naval_losses = 0
         
-        for battle in war.battles:
-            if is_attacker:
-                units = battle.attacker.get('units', {})
-                losses = battle.attacker.get('losses', 0)
-            else:
-                units = battle.defender.get('units', {})
-                losses = battle.defender.get('losses', 0)
-            
-            # Separate land and naval units
-            land_units_in_battle = 0
-            naval_units_in_battle = 0
-            
-            for unit_type, count in units.items():
-                unit_category = self._unit_types.get(unit_type, 'infantry')  # Default to infantry if unknown
-                
-                if UnitTypeClassifier.is_land_unit(unit_category):
-                    land_units_in_battle += count
-                elif UnitTypeClassifier.is_naval_unit(unit_category):
-                    naval_units_in_battle += count
-                else:
-                    # Default to land if we can't determine
-                    land_units_in_battle += count
-            
-            total_land_army += land_units_in_battle
-            total_naval_ships += naval_units_in_battle
-            
-            # Distribute losses proportionally between land and naval
-            total_units_in_battle = land_units_in_battle + naval_units_in_battle
-            if total_units_in_battle > 0:
-                land_loss_ratio = land_units_in_battle / total_units_in_battle
-                naval_loss_ratio = naval_units_in_battle / total_units_in_battle
-            else:
-                land_loss_ratio = 1.0  # Default to land if no units
-                naval_loss_ratio = 0.0
-            
-            total_land_losses += int(losses * land_loss_ratio)
-            total_naval_losses += int(losses * naval_loss_ratio)
+        # Sort battles by date to track reinforcement flow
+        sorted_battles = sorted(war.battles, key=lambda b: getattr(b, 'start_date', ''))
         
+        for battle in sorted_battles:
+            # Process attacker
+            attacker_leader = battle.attacker.get('leader', 'Unknown')
+            attacker_units = battle.attacker.get('units', {})
+            attacker_losses = battle.attacker.get('losses', 0)
+            
+            # Calculate land and naval units for this battle
+            attacker_land_units = 0
+            attacker_naval_units = 0
+            
+            for unit_type, count in attacker_units.items():
+                unit_category = self._unit_types.get(unit_type, 'infantry')
+                if UnitTypeClassifier.is_land_unit(unit_category):
+                    attacker_land_units += count
+                elif UnitTypeClassifier.is_naval_unit(unit_category):
+                    attacker_naval_units += count
+            
+            # Calculate survivors
+            total_attacker_units = attacker_land_units + attacker_naval_units
+            if total_attacker_units > 0:
+                land_loss_ratio = attacker_land_units / total_attacker_units
+                naval_loss_ratio = attacker_naval_units / total_attacker_units
+            else:
+                land_loss_ratio = 0.5
+                naval_loss_ratio = 0.5
+                
+            attacker_land_survivors = max(0, attacker_land_units - int(attacker_losses * land_loss_ratio))
+            attacker_naval_survivors = max(0, attacker_naval_units - int(attacker_losses * naval_loss_ratio))
+            
+            if attacker_leader != "Unknown" and is_attacker:
+                last_land_survivors = commander_survivors.get(attacker_leader, {}).get('land', 0)
+                last_naval_survivors = commander_survivors.get(attacker_leader, {}).get('naval', 0)
+                
+                # YOUR LOGIC: Only count reinforcements beyond what survived from last battle
+                if attacker_land_units > last_land_survivors:
+                    new_land_reinforcements = attacker_land_units - last_land_survivors
+                    total_land_army += new_land_reinforcements
+                
+                if attacker_naval_units > last_naval_survivors:
+                    new_naval_reinforcements = attacker_naval_units - last_naval_survivors
+                    total_naval_ships += new_naval_reinforcements
+                
+                # Update survivors for next battle
+                if attacker_leader not in commander_survivors:
+                    commander_survivors[attacker_leader] = {}
+                commander_survivors[attacker_leader]['land'] = attacker_land_survivors
+                commander_survivors[attacker_leader]['naval'] = attacker_naval_survivors
+            
+            # Process defender
+            defender_leader = battle.defender.get('leader', 'Unknown')
+            defender_units = battle.defender.get('units', {})
+            defender_losses = battle.defender.get('losses', 0)
+            
+            defender_land_units = 0
+            defender_naval_units = 0
+            
+            for unit_type, count in defender_units.items():
+                unit_category = self._unit_types.get(unit_type, 'infantry')
+                if UnitTypeClassifier.is_land_unit(unit_category):
+                    defender_land_units += count
+                elif UnitTypeClassifier.is_naval_unit(unit_category):
+                    defender_naval_units += count
+            
+            total_defender_units = defender_land_units + defender_naval_units
+            if total_defender_units > 0:
+                land_loss_ratio = defender_land_units / total_defender_units
+                naval_loss_ratio = defender_naval_units / total_defender_units
+            else:
+                land_loss_ratio = 0.5
+                naval_loss_ratio = 0.5
+                
+            defender_land_survivors = max(0, defender_land_units - int(defender_losses * land_loss_ratio))
+            defender_naval_survivors = max(0, defender_naval_units - int(defender_losses * naval_loss_ratio))
+            
+            if defender_leader != "Unknown" and not is_attacker:
+                last_land_survivors = commander_survivors.get(defender_leader, {}).get('land', 0)
+                last_naval_survivors = commander_survivors.get(defender_leader, {}).get('naval', 0)
+                
+                if defender_land_units > last_land_survivors:
+                    new_land_reinforcements = defender_land_units - last_land_survivors
+                    total_land_army += new_land_reinforcements
+                
+                if defender_naval_units > last_naval_survivors:
+                    new_naval_reinforcements = defender_naval_units - last_naval_survivors
+                    total_naval_ships += new_naval_reinforcements
+                
+                if defender_leader not in commander_survivors:
+                    commander_survivors[defender_leader] = {}
+                commander_survivors[defender_leader]['land'] = defender_land_survivors
+                commander_survivors[defender_leader]['naval'] = defender_naval_survivors
+            
+            # Accumulate losses for this side
+            if is_attacker:
+                total_land_losses += int(attacker_losses * land_loss_ratio)
+                total_naval_losses += int(attacker_losses * naval_loss_ratio)
+            else:
+                total_land_losses += int(defender_losses * land_loss_ratio)
+                total_naval_losses += int(defender_losses * naval_loss_ratio)
+        
+        # [REST OF YOUR DRAWING CODE - same as before]
         # Draw land army icon and text
         army_icon_path = self.state.get_modded_path(os.path.join("gfx", "interface", "pops_mini.dds"))
         army_icon = SafeLoader.safe_load_image(army_icon_path)
         if army_icon:
-            # Crop 192px from left, 160px from right to get 32x32
             army_cropped = army_icon.crop((192, 0, 192 + 32, 32))
             photo_army = ImageTk.PhotoImage(army_cropped)
             self.image_refs.append(photo_army)
             self.canvas.create_image(x, y - 2, anchor=tk.NW, image=photo_army)
         
-        # Draw land army text - NOW ONLY LAND UNITS - FIXED: Separate labels and numbers
         label_x = x + 35
-        number_x = x + 195  # Fixed position for numbers
+        number_x = x + 195
 
         # Army size
         army_size_label = self.font_manager.render_text("Army size:", size=15, color="black")
         if army_size_label:
-            # Crop transparent padding
             bbox = army_size_label.getbbox()
             if bbox:
                 army_size_label = army_size_label.crop(bbox)
@@ -5336,7 +5531,6 @@ class WarAnalyzerGUI:
         
         army_size_number = self.font_manager.render_text(f"{total_land_army:,}", size=15, color="black")
         if army_size_number:
-            # Crop transparent padding for proper NE anchoring
             bbox = army_size_number.getbbox()
             if bbox:
                 army_size_number = army_size_number.crop(bbox)
@@ -5347,7 +5541,6 @@ class WarAnalyzerGUI:
         # Army losses
         losses_label = self.font_manager.render_text("Losses:", size=15, color="black")
         if losses_label:
-            # Crop transparent padding
             bbox = losses_label.getbbox()
             if bbox:
                 losses_label = losses_label.crop(bbox)
@@ -5357,7 +5550,6 @@ class WarAnalyzerGUI:
         
         losses_number = self.font_manager.render_text(f"{total_land_losses:,}", size=15, color="black")
         if losses_number:
-            # Crop transparent padding for proper NE anchoring
             bbox = losses_number.getbbox()
             if bbox:
                 losses_number = losses_number.crop(bbox)
@@ -5365,11 +5557,10 @@ class WarAnalyzerGUI:
             self.image_refs.append(losses_num_photo)
             self.canvas.create_image(number_x, y + 18, anchor=tk.NE, image=losses_num_photo)
 
-        # Draw naval ships icon and text - NOW ONLY NAVAL UNITS
+        # Draw naval ships
         ships_icon_path = self.state.get_modded_path(os.path.join("gfx", "interface", "unit_strip_naval_combat_1_R.dds"))
         ships_icon = SafeLoader.safe_load_image(ships_icon_path)
         if ships_icon:
-            # Crop based on ship types found
             crop_left = naval_stats['ship_crop_left']
             crop_right = naval_stats['ship_crop_right']
             ships_cropped = ships_icon.crop((crop_left, 0, 360 - crop_right, 36))
@@ -5381,7 +5572,6 @@ class WarAnalyzerGUI:
         # Navy size
         navy_size_label = self.font_manager.render_text("Navy size:", size=15, color="black")
         if navy_size_label:
-            # Crop transparent padding
             bbox = navy_size_label.getbbox()
             if bbox:
                 navy_size_label = navy_size_label.crop(bbox)
@@ -5391,7 +5581,6 @@ class WarAnalyzerGUI:
         
         navy_size_number = self.font_manager.render_text(f"{total_naval_ships:,}", size=15, color="black")
         if navy_size_number:
-            # Crop transparent padding for proper NE anchoring
             bbox = navy_size_number.getbbox()
             if bbox:
                 navy_size_number = navy_size_number.crop(bbox)
@@ -5402,7 +5591,6 @@ class WarAnalyzerGUI:
         # Navy sunk
         sunk_label = self.font_manager.render_text("Sunk:", size=15, color="black")
         if sunk_label:
-            # Crop transparent padding
             bbox = sunk_label.getbbox()
             if bbox:
                 sunk_label = sunk_label.crop(bbox)
@@ -5412,7 +5600,6 @@ class WarAnalyzerGUI:
         
         sunk_number = self.font_manager.render_text(f"{total_naval_losses:,}", size=15, color="black")
         if sunk_number:
-            # Crop transparent padding for proper NE anchoring
             bbox = sunk_number.getbbox()
             if bbox:
                 sunk_number = sunk_number.crop(bbox)
@@ -6639,15 +6826,15 @@ class WarList:
         # Calculate war statistics
         stats = WarAnalyzer.calculate_war_statistics(war)
         
-        # Calculate total army size for both sides
-        total_attacker_army = 0
-        total_defender_army = 0
+        # Calculate total army size for both sides using commander-based method
+        if not hasattr(self.gui, '_unit_types'):
+            self.gui._unit_types = UnitTypeClassifier.load_unit_types(self.state)
         
-        for battle in war.battles:
-            attacker_units = battle.attacker.get('units', {})
-            defender_units = battle.defender.get('units', {})
-            total_attacker_army += sum(attacker_units.values())
-            total_defender_army += sum(defender_units.values())
+        # Calculate using new commander-based method
+        attacker_land, attacker_naval, defender_land, defender_naval, _, _ = self.gui.calculate_total_army_size_by_country(war, self.gui._unit_types)
+        
+        total_attacker_army = attacker_land + attacker_naval
+        total_defender_army = defender_land + defender_naval
         
         # Format army sizes to be compact
         def format_army_size(num):
