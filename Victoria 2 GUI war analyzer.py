@@ -1272,13 +1272,25 @@ class OptimizedSavefileParser:
                     'date': date
                 })
 
-        # SIMPLIFIED date calculation - just use first and last events
         start_date = None
         end_date = None
 
+        def date_to_sortable(date_str):
+            """Convert YYYY.M.D to YYYYMMDD for proper sorting"""
+            if not date_str:
+                return "00000000"
+            try:
+                parts = date_str.split('.')
+                year = parts[0].zfill(4)
+                month = parts[1].zfill(2) if len(parts) > 1 else "01"
+                day = parts[2].zfill(2) if len(parts) > 2 else "01"
+                return year + month + day
+            except:
+                return "00000000"
+
         if participation_events:
-            # Sort by date
-            participation_events.sort(key=lambda x: x['date'])
+            # Sort by proper date format, not string comparison
+            participation_events.sort(key=lambda x: date_to_sortable(x['date']))
             start_date = participation_events[0]['date']
             end_date = participation_events[-1]['date']
 
