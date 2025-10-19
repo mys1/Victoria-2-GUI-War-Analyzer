@@ -105,15 +105,16 @@ class WarStatistics:
 
 @dataclass
 class AppConfig:
-    """Application configuration"""
+    """Application configuration with multiple mod support."""
     recent_files: List[str] = field(default_factory=list)
     window_position: Tuple[int, int] = (100, 100)
-    default_mod: str = "None"
+    default_mods: List[str] = field(default_factory=list)  # Changed from default_mod to default_mods
     auto_load_last: bool = False
-    last_mod: str = "None"
+    last_mods: List[str] = field(default_factory=list)  # Changed from last_mod to last_mods
     
     @classmethod
     def load(cls, path: str = None):
+        """Load configuration from JSON file with migration from single-mod format."""
         # Use the same directory as the Python script
         if path is None:
             script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -123,22 +124,52 @@ class AppConfig:
             if os.path.exists(path):
                 with open(path, 'r') as f:
                     data = json.load(f)
-                    # Ensure all fields exist
+                    
+                    # Migrate from old single-mod format to new multiple mods format
+                    data = cls._migrate_from_single_mod(data)
+                    
+                    # Ensure all fields exist with proper defaults
                     if 'recent_files' not in data:
                         data['recent_files'] = []
                     if 'window_position' not in data:
                         data['window_position'] = (100, 100)
-                    if 'default_mod' not in data:
-                        data['default_mod'] = "None"
+                    if 'default_mods' not in data:
+                        data['default_mods'] = []
                     if 'auto_load_last' not in data:
                         data['auto_load_last'] = False
-                    if 'last_mod' not in data:
-                        data['last_mod'] = "None"
+                    if 'last_mods' not in data:
+                        data['last_mods'] = []
+                        
                     return cls(**data)
-        except Exception:
+        except Exception as e:
+            print(f"Error loading config: {e}")
             # Silently return default config if loading fails
             pass
         return cls()
+    
+    @classmethod
+    def _migrate_from_single_mod(cls, data: Dict) -> Dict:
+        """Migrate from old single-mod format to new multiple mods format."""
+        # Check if we have old single-mod fields that need migration
+        if 'default_mod' in data and 'default_mods' not in data:
+            # Migrate default_mod to default_mods
+            if data['default_mod'] and data['default_mod'] != "None":
+                data['default_mods'] = [data['default_mod']]
+            else:
+                data['default_mods'] = []
+            # Remove the old field to avoid confusion
+            del data['default_mod']
+        
+        if 'last_mod' in data and 'last_mods' not in data:
+            # Migrate last_mod to last_mods
+            if data['last_mod'] and data['last_mod'] != "None":
+                data['last_mods'] = [data['last_mod']]
+            else:
+                data['last_mods'] = []
+            # Remove the old field to avoid confusion
+            del data['last_mod']
+        
+        return data
     
     def save(self, path: str = None):
         """Save configuration to JSON file."""
@@ -150,22 +181,52 @@ class AppConfig:
             config_dict = {
                 'recent_files': self.recent_files,
                 'window_position': self.window_position,
-                'default_mod': self.default_mod,
+                'default_mods': self.default_mods,
                 'auto_load_last': self.auto_load_last,
-                'last_mod': self.last_mod
+                'last_mods': self.last_mods
             }
             
             with open(path, 'w') as f:
                 json.dump(config_dict, f, indent=2)
                 
-        except Exception:
+        except Exception as e:
+            print(f"Error saving config: {e}")
             # Silently fail if saving config fails
             pass
+    
+    def get_active_mods_display(self) -> str:
+        """Get a display string for the active mods."""
+        if not self.default_mods:
+            return "None"
+        return ", ".join(self.default_mods)
+    
+    def has_mods(self) -> bool:
+        """Check if any mods are configured."""
+        return len(self.default_mods) > 0
+    
+    def add_mod(self, mod_name: str):
+        """Add a mod to the configuration if it doesn't already exist."""
+        if mod_name and mod_name not in self.default_mods:
+            self.default_mods.append(mod_name)
+    
+    def remove_mod(self, mod_name: str):
+        """Remove a mod from the configuration."""
+        if mod_name in self.default_mods:
+            self.default_mods.remove(mod_name)
+    
+    def set_mods(self, mod_list: List[str]):
+        """Set the mod list, replacing any existing mods."""
+        self.default_mods = [mod for mod in mod_list if mod]  # Filter out empty strings
+    
+    def clear_mods(self):
+        """Clear all mods from the configuration."""
+        self.default_mods.clear()
+        self.last_mods.clear()
 
 @dataclass
 class AppState:
     vic2_path: Optional[str] = None
-    mod_name: str = "None"
+    mod_names: List[str] = field(default_factory=list)  # Changed from mod_name to mod_names
     save_file_path: str = "No save file selected"
     
     # Data caching
@@ -180,15 +241,32 @@ class AppState:
     _cb_types_cache: Optional[Dict[str, int]] = field(default_factory=dict)
     _unit_types_cache: Optional[Dict[str, str]] = None
     
-    # Don't initialize here, do it in __post_init__
+    # Image caches
     image_cache: 'ImageCache' = None
     war_image_cache: 'ImageCache' = None
     
+    # Runtime state
+    filtered_wars: List[War] = field(default_factory=list)
+    selected_war_index: Optional[int] = None
+    selected_countries: Set[str] = field(default_factory=set)
+    
+    # Game data
+    gov_to_flagtype: Dict[str, str] = field(default_factory=dict)
+    gov_index_map: Dict[str, str] = field(default_factory=dict)
+    
+    # Configuration
+    config: AppConfig = field(default_factory=AppConfig)
+    
     def __post_init__(self):
+        # Initialize image caches if not provided
         if self.image_cache is None:
             self.image_cache = ImageCache(max_size=1000)
         if self.war_image_cache is None:
             self.war_image_cache = ImageCache(max_size=800)
+        
+        # Set mods from config if not explicitly provided
+        if not self.mod_names and self.config and self.config.default_mods:
+            self.mod_names = self.config.default_mods.copy()
     
     # Add property for save_file_text
     @property
@@ -241,32 +319,122 @@ class AppState:
     def _country_cultures(self, value: Dict[str, str]):
         self._parsed_country_cultures = value
     
-    # Existing fields
-    filtered_wars: List[War] = field(default_factory=list)
-    selected_war_index: Optional[int] = None
-    selected_countries: Set[str] = field(default_factory=set)
-    
-    gov_to_flagtype: Dict[str, str] = field(default_factory=dict)
-    gov_index_map: Dict[str, str] = field(default_factory=dict)
-    localization_names: Dict[str, str] = field(default_factory=dict)
-
-    image_cache: 'ImageCache' = field(default_factory=lambda: ImageCache())
-    config: AppConfig = field(default_factory=AppConfig)
-    save_file_text: str = ""
-    
     def get_modded_path(self, relative_path: str) -> str:
-        """Get the path to a file or directory, checking mod folder first then base game."""
-        if self.mod_name != "None" and self.vic2_path:
-            mod_path = Path(self.vic2_path) / "mod" / self.mod_name / relative_path
-            if mod_path.exists():
-                return str(mod_path)
+        """Get the path to a file or directory, checking mod folders in order then base game."""
+        # Check each mod in the specified order
+        for mod_name in self.mod_names:
+            if mod_name and mod_name != "None" and self.vic2_path:
+                mod_path = Path(self.vic2_path) / "mod" / mod_name / relative_path
+                if mod_path.exists():
+                    return str(mod_path)
         
+        # Fallback to base game
         if self.vic2_path:
             base_path = Path(self.vic2_path) / relative_path
             if base_path.exists():
                 return str(base_path)
         
         return relative_path
+    
+    def set_mods_from_config(self):
+        """Set mod names from the configuration."""
+        if self.config:
+            self.mod_names = self.config.default_mods.copy()
+    
+    def get_active_mods_display(self) -> str:
+        """Get a display string for the active mods."""
+        if not self.mod_names:
+            return "None"
+        return ", ".join(self.mod_names)
+    
+    def has_mods(self) -> bool:
+        """Check if any mods are active."""
+        return len(self.mod_names) > 0
+    
+    @property
+    def mod_name(self) -> str:
+        """Backward compatibility property - returns first mod or 'None'"""
+        if self.mod_names:
+            return self.mod_names[0]
+        return "None"
+    
+    @mod_name.setter
+    def mod_name(self, value: str):
+        """Backward compatibility setter - converts single mod to list"""
+        if value == "None" or not value:
+            self.mod_names = []
+        else:
+            self.mod_names = [value]
+    
+class ModManager:
+    """Manages multiple mod loading order and file resolution."""
+    
+class ModManager:
+    """Manages multiple mod loading order and file resolution."""
+    
+    @staticmethod
+    def get_available_mods(vic2_path: str) -> List[str]:
+        """Get list of available mods by reading all folders in the mod directory."""
+        if not vic2_path:
+            return []
+            
+        mods_path = Path(vic2_path) / "mod"
+        if not mods_path.exists():
+            return []
+        
+        available_mods = []
+        
+        # Simply get all directories in the mod folder
+        for item in mods_path.iterdir():
+            if item.is_dir():
+                # Skip system folders
+                if item.name.lower() in ['.git', '.svn', '__pycache__', 'backup', 'temp']:
+                    continue
+                available_mods.append(item.name)
+        
+        return sorted(available_mods)
+    
+    @staticmethod
+    def get_available_mods_with_info(vic2_path: str) -> List[Tuple[str, str]]:
+        """Get mods - simplified to just return folder names."""
+        if not vic2_path:
+            return []
+            
+        mods_path = Path(vic2_path) / "mod"
+        if not mods_path.exists():
+            return []
+        
+        available_mods = []
+        
+        for item in mods_path.iterdir():
+            if item.is_dir():
+                mod_name = item.name
+                
+                # Skip system folders
+                if mod_name.lower() in ['.git', '.svn', '__pycache__', 'backup', 'temp']:
+                    continue
+                
+                # Just return the folder name with empty info string
+                available_mods.append((mod_name, ""))
+        
+        return sorted(available_mods, key=lambda x: x[0])
+    
+    @staticmethod
+    def validate_mod_order(mod_names: List[str], vic2_path: str) -> List[str]:
+        """Validate that all mods in the list exist and remove invalid ones."""
+        if not vic2_path:
+            return []
+            
+        available_mods = set(ModManager.get_available_mods(vic2_path))
+        valid_mods = []
+        
+        for mod_name in mod_names:
+            if mod_name in available_mods:
+                valid_mods.append(mod_name)
+            else:
+                print(f"Warning: Mod '{mod_name}' not found in mods directory, skipping")
+        
+        return valid_mods
 
 @dataclass
 class FontChar:
@@ -709,8 +877,6 @@ class CustomCheckbox:
 # ============================================================================
 
 class CultureLeaderMapper:
-    """Maps cultures to leader types and loads appropriate leader graphics."""
-    
     @staticmethod
     def load_culture_group_mappings(state: AppState) -> Dict[str, str]:
         if state._culture_mappings_cache is not None:
@@ -1350,12 +1516,17 @@ class UnitTypeClassifier:
         units_path = state.get_modded_path(os.path.join("units"))
         
         if not os.path.exists(units_path):
-            # Try alternative paths
+            # Try alternative paths - UPDATED: remove the old mod_name reference
             alternative_paths = [
                 state.get_modded_path("units"),
                 os.path.join(state.vic2_path, "units") if state.vic2_path else "",
-                os.path.join(state.vic2_path, "mod", state.mod_name, "units") if state.vic2_path and state.mod_name != "None" else "",
             ]
+            
+            # Add paths for each mod individually (backward compatibility)
+            if state.vic2_path and state.mod_names:
+                for mod_name in state.mod_names:
+                    mod_units_path = os.path.join(state.vic2_path, "mod", mod_name, "units")
+                    alternative_paths.append(mod_units_path)
             
             for alt_path in alternative_paths:
                 if alt_path and os.path.exists(alt_path):
@@ -1725,30 +1896,17 @@ class LocalizationParser:
     
     @staticmethod
     def parse_localization_files(state: AppState) -> Dict[str, str]:
-        """Parse localization - distinguish between country names, government names, and other entries."""
+        """Parse localization with proper multiple mod load order support."""
         if state._localization_cache is not None:
             return state._localization_cache
             
         country_names = {}
         loc_path = "localisation"
         
-        # Get all files from both mod and base
+        # Get all files in the correct load order (last mod wins)
         all_files = []
         
-        # MOD files first
-        if state.mod_name != "None" and state.vic2_path:
-            mod_loc_path = Path(state.vic2_path) / "mod" / state.mod_name / loc_path
-            if mod_loc_path.exists():
-                mod_files = []
-                for root, dirs, files in os.walk(str(mod_loc_path)):
-                    for file in files:
-                        if file.lower().endswith('.csv'):
-                            full_path = os.path.join(root, file)
-                            mod_files.append(full_path)
-                mod_files.sort()
-                all_files.extend(mod_files)
-        
-        # BASE files second
+        # BASE files first (lowest priority)
         if state.vic2_path:
             base_loc_path = Path(state.vic2_path) / loc_path
             if base_loc_path.exists():
@@ -1761,11 +1919,26 @@ class LocalizationParser:
                 base_files.sort()
                 all_files.extend(base_files)
         
+        # MOD files in REVERSE order (so last mod in list has highest priority)
+        if state.mod_names and state.vic2_path:
+            # Process mods in the order they appear in mod_names (first mod = lowest priority)
+            for mod_name in state.mod_names:
+                mod_loc_path = Path(state.vic2_path) / "mod" / mod_name / loc_path
+                if mod_loc_path.exists():
+                    mod_files = []
+                    for root, dirs, files in os.walk(str(mod_loc_path)):
+                        for file in files:
+                            if file.lower().endswith('.csv'):
+                                full_path = os.path.join(root, file)
+                                mod_files.append(full_path)
+                    mod_files.sort()
+                    all_files.extend(mod_files)
+        
         # Track what we've found for each category
         found_simple_country_tags = set()  # "ARY", "ARA" - basic country names
         found_government_tags = set()      # "ARY_absolute_monarchy" - government-specific names
         
-        # Process ALL files in order
+        # Process ALL files in order (later files override earlier ones)
         for file_path in all_files:
             try:
                 encodings = ['utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1', 'utf-8']
@@ -1826,31 +1999,30 @@ class LocalizationParser:
                     # CATEGORY 3: Everything else (parties, adjectives, etc.)
                     
                     if is_simple_country_tag:
-                        # Simple country name - first match wins
-                        if key not in found_simple_country_tags:
-                            country_names[key] = value
-                            found_simple_country_tags.add(key)
-                            
-                            # Store lowercase version
-                            country_names[key.lower()] = value
+                        # Simple country name - ALWAYS override (last mod wins)
+                        country_names[key] = value
+                        found_simple_country_tags.add(key)
+                        
+                        # Store lowercase version
+                        country_names[key.lower()] = value
                     
                     elif is_government_tag:
-                        # Government-specific country name - first match wins per government type
-                        if key not in found_government_tags:
-                            country_names[key] = value
-                            found_government_tags.add(key)
-                            
-                            # Store lowercase version
-                            country_names[key.lower()] = value
+                        # Government-specific country name - ALWAYS override (last mod wins)
+                        country_names[key] = value
+                        found_government_tags.add(key)
+                        
+                        # Store lowercase version
+                        country_names[key.lower()] = value
                     
                     else:
-                        # Everything else (parties, adjectives, etc.) - ALWAYS store
+                        # Everything else (parties, adjectives, etc.) - ALWAYS override
                         country_names[key] = value
                         if key != key.lower():
                             country_names[key.lower()] = value
                         if '_' in key:
                             simplified_key = key.replace('_', '')
                             country_names[simplified_key] = value
+        
         state._localization_cache = country_names
         return country_names
     
@@ -1937,11 +2109,15 @@ class LocalizationParser:
         
         # Try government-specific name first (e.g., RUS_absolute_monarchy)
         if government:
+            # Try various government name formats
             gov_keys_to_try = [
                 f"{tag}_{government}",
                 f"{tag}_{government.lower()}",
                 f"{tag.upper()}_{government}",
                 f"{tag.upper()}_{government.lower()}",
+                # Also try without underscores for some mods
+                f"{tag}{government}",
+                f"{tag}{government.lower()}",
             ]
             
             for gov_key in gov_keys_to_try:
@@ -2605,12 +2781,13 @@ class WarAnalyzerGUI:
         if self.auto_load_executed:
             return
             
-        # Load last mod
-        if self.state.config.last_mod and self.state.config.last_mod != "None":
-            self.state.mod_name = self.state.config.last_mod
+        # Load last mods
+        if self.state.config.last_mods:
+            self.state.mod_names = self.state.config.last_mods.copy()
             # Update the mod label if it exists
             if hasattr(self, 'mod_label'):
-                self.mod_label.config(text=f"Current Mod: {self.state.mod_name}")
+                mod_display = ', '.join(self.state.mod_names) if self.state.mod_names else 'None'
+                self.mod_label.config(text=f"Current Mods: {mod_display}")
         
         # Load last file
         if self.state.config.recent_files:
@@ -2752,7 +2929,7 @@ class WarAnalyzerGUI:
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load save: {e}")
-    
+        
     def _create_tab_definitions(self) -> Dict:
         """Define all tab layouts."""
         base_layers = [
@@ -2986,18 +3163,6 @@ class WarAnalyzerGUI:
                 return icon
         
         return None
-
-    def _reload_cb_icons(self):
-        # Clear the cache to force reload
-        if hasattr(self, '_cb_icons_loaded'):
-            self._cb_icons_loaded = False
-        if hasattr(self, '_cb_icons'):
-            self._cb_icons.clear()
-        if hasattr(self, 'cb_to_sprite'):
-            self.cb_to_sprite.clear()
-        
-        # Reload the icons
-        self._load_cb_icons()
 
     def _extract_cb_name_from_goal(self, goal_text: str) -> Optional[str]:
         """Extract the CB name from goal description text with better matching."""
@@ -3958,11 +4123,19 @@ class WarAnalyzerGUI:
         defender_leader_display = shorten_name(defender_leader_name)
         
         attacker_leader_text = self.font_manager.render_text(attacker_leader_display, size=18, color="black")
+        # Crop transparent padding for proper anchor positioning
+        bbox = attacker_leader_text.getbbox()
+        if bbox:
+            attacker_leader_text = attacker_leader_text.crop(bbox)
         attacker_leader_photo = ImageTk.PhotoImage(attacker_leader_text)
         canvas.create_image(55, 140, anchor=tk.NW, image=attacker_leader_photo)
         images_refs.append(attacker_leader_photo)
 
         defender_leader_text = self.font_manager.render_text(defender_leader_display, size=18, color="black")
+        # Crop transparent padding for proper anchor positioning  
+        bbox = defender_leader_text.getbbox()
+        if bbox:
+            defender_leader_text = defender_leader_text.crop(bbox)
         defender_leader_photo = ImageTk.PhotoImage(defender_leader_text)
         canvas.create_image(485, 140, anchor=tk.NE, image=defender_leader_photo)
         images_refs.append(defender_leader_photo)
@@ -5441,14 +5614,140 @@ class WarAnalyzerGUI:
             self._flag_tooltip_cache.clear()
     
     def _draw_settings_tab(self):
-        """Draw the settings tab content."""
-        # Mod selector
-        def choose_mod():
-            folder_path = filedialog.askdirectory(title="Select Mod Folder")
-            if folder_path:
-                self.state.mod_name = os.path.basename(folder_path)
-                self.state.config.default_mod = self.state.mod_name
-                self.state.config.last_mod = self.state.mod_name
+        """Draw the settings tab content with multiple mod support."""
+        # Mod selector - UPDATED FOR MULTIPLE MODS
+        def choose_mods():
+            # Create mod selection dialog - exact size of background image
+            selection_dialog = tk.Toplevel(self.root)
+            selection_dialog.title("Mod Manager")
+            selection_dialog.geometry("700x468")  # Exact size of unit_reorg_bg.dds
+            selection_dialog.transient(self.root)
+            selection_dialog.grab_set()
+            selection_dialog.configure(bg=BG_COLOR)
+            selection_dialog.resizable(False, False)  # Prevent resizing
+            
+            # Create canvas for background and graphics - exactly 700x468
+            canvas = tk.Canvas(selection_dialog, width=700, height=468, highlightthickness=0, bg=BG_COLOR)
+            canvas.pack(fill=tk.BOTH, expand=True)
+            
+            # Load and display background image - full window coverage
+            bg_path = self.state.get_modded_path(os.path.join("gfx", "interface", "unit_reorg_bg.dds"))
+            bg_image = SafeLoader.safe_load_image(bg_path, (700, 468))  # Exact window size
+            
+            if bg_image:
+                bg_photo = ImageTk.PhotoImage(bg_image)
+                # Cover the entire window
+                canvas.create_image(0, 0, anchor=tk.NW, image=bg_photo)
+                # Keep reference to prevent garbage collection
+                selection_dialog.bg_photo = bg_photo
+            
+            # Title - directly on canvas
+            title_img = self.font_manager.render_bold_text("Select Mods", size=22, color="white")
+            title_photo = ImageTk.PhotoImage(title_img)
+            canvas.create_image(350, 40, anchor=tk.CENTER, image=title_photo)
+            selection_dialog.title_photo = title_photo
+            
+            # Get all folders in the mod directory
+            available_mods_with_info = ModManager.get_available_mods_with_info(self.state.vic2_path)
+            
+            # Labels - directly on canvas for transparency
+            available_label_img = self.font_manager.render_text("Available mods", size=12, color="black")
+            available_label_photo = ImageTk.PhotoImage(available_label_img)
+            canvas.create_image(225, 73, anchor=tk.W, image=available_label_photo)
+            selection_dialog.available_label_photo = available_label_photo
+            
+            current_label_img = self.font_manager.render_text("Load order", size=12, color="black")
+            current_label_photo = ImageTk.PhotoImage(current_label_img)
+            canvas.create_image(500, 73, anchor=tk.E, image=current_label_photo)
+            selection_dialog.current_label_photo = current_label_photo
+            
+            # LEFT SIDE - Available Mods Listbox (directly on canvas)
+            available_listbox_frame = tk.Frame(canvas, bg=BG_COLOR)
+            canvas.create_window(13, 70, anchor=tk.NW, window=available_listbox_frame, width=330, height=340)
+            
+            available_listbox = tk.Listbox(available_listbox_frame,
+                                        height=12,
+                                        bg="#a8a692",
+                                        fg="black", 
+                                        selectbackground="#4A4A4A",
+                                        selectforeground="white",
+                                        font=("Arial", 9),
+                                        relief=tk.SUNKEN,
+                                        borderwidth=2)
+            available_scrollbar = tk.Scrollbar(available_listbox_frame, orient=tk.VERTICAL, command=available_listbox.yview)
+            available_listbox.configure(yscrollcommand=available_scrollbar.set)
+            
+            available_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            available_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+            
+            # RIGHT SIDE - Current Load Order Listbox (directly on canvas)
+            current_listbox_frame = tk.Frame(canvas, bg=BG_COLOR)
+            canvas.create_window(356, 70, anchor=tk.NW, window=current_listbox_frame, width=330, height=340)
+            
+            current_listbox = tk.Listbox(current_listbox_frame,
+                                        height=12,
+                                        bg="#a8a692",
+                                        fg="black", 
+                                        selectbackground="#4A4A4A",
+                                        selectforeground="white",
+                                        font=("Arial", 9),
+                                        relief=tk.SUNKEN,
+                                        borderwidth=2)
+            current_scrollbar = tk.Scrollbar(current_listbox_frame, orient=tk.VERTICAL, command=current_listbox.yview)
+            current_listbox.configure(yscrollcommand=current_scrollbar.set)
+            
+            current_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            current_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+                        
+            # Add mods to available listbox - NO MAPPING NEEDED
+            for mod_name, _ in available_mods_with_info:
+                if mod_name not in self.state.mod_names:
+                    available_listbox.insert(tk.END, mod_name)
+
+            def add_mod():
+                selection = available_listbox.curselection()
+                if selection:
+                    index = selection[0]
+                    mod_name = available_listbox.get(index)  # Get directly from listbox
+                    if mod_name:
+                        current_listbox.insert(tk.END, mod_name)
+                        available_listbox.delete(index)
+
+            def remove_mod():
+                selection = current_listbox.curselection()
+                if selection:
+                    index = selection[0]
+                    mod_name = current_listbox.get(index)  # Get directly from listbox
+                    current_listbox.delete(index)
+                    available_listbox.insert(tk.END, mod_name)
+
+            def move_up():
+                selection = current_listbox.curselection()
+                if selection and selection[0] > 0:
+                    index = selection[0]
+                    mod_name = current_listbox.get(index)
+                    current_listbox.delete(index)
+                    current_listbox.insert(index - 1, mod_name)
+                    current_listbox.select_set(index - 1)
+
+            def move_down():
+                selection = current_listbox.curselection()
+                if selection and selection[0] < current_listbox.size() - 1:
+                    index = selection[0]
+                    mod_name = current_listbox.get(index)
+                    current_listbox.delete(index)
+                    current_listbox.insert(index + 1, mod_name)
+                    current_listbox.select_set(index + 1)
+
+            def apply_selection():
+                new_mods = []
+                for i in range(current_listbox.size()):
+                    mod_name = current_listbox.get(i)
+                    new_mods.append(mod_name)
+                    
+                self.state.mod_names = ModManager.validate_mod_order(new_mods, self.state.vic2_path)
+                self.state.config.default_mods = self.state.mod_names.copy()
+                self.state.config.last_mods = self.state.mod_names.copy()
                 self.state.config.save()
                 
                 # CLEAR ALL MOD-SPECIFIC CACHES
@@ -5456,12 +5755,108 @@ class WarAnalyzerGUI:
                 
                 self._reload_assets()
                 self._reload_cb_icons()
-                self.mod_label.config(text=f"Current Mod: {self.state.mod_name}")
+                mod_display = ', '.join(self.state.mod_names) if self.state.mod_names else 'None'
+                self.mod_label.config(text=f"Current Mods: {mod_display}")
+                selection_dialog.destroy()
 
-        def clear_mod():
-            self.state.mod_name = "None"
-            self.state.config.default_mod = "None"
-            self.state.config.last_mod = "None"
+            # BOTTOM BUTTONS - directly on canvas
+            buttons_frame = tk.Frame(canvas, bg=BG_COLOR)
+            canvas.create_window(350, 400, anchor=tk.CENTER, window=buttons_frame)
+            button_images = []           
+            def create_button_on_canvas(x, y, text, command, image_path, width, height, flip_horizontal=False):
+                """Create a button directly on the canvas with proper text compositing."""
+                btn_image = SafeLoader.safe_load_image(image_path, (width, height))
+                
+                if btn_image and flip_horizontal:
+                    btn_image = btn_image.transpose(Image.FLIP_LEFT_RIGHT)
+                
+                if btn_image:
+                    # Ensure both images are RGBA
+                    if btn_image.mode != 'RGBA':
+                        btn_image = btn_image.convert('RGBA')
+                    
+                    # Create the button image with text using alpha_composite (like the working version)
+                    composite = btn_image.copy()
+                    
+                    # Add text to the button image using proper alpha compositing
+                    text_img = self.font_manager.render_text(text, size=18, color="black")
+                    if text_img:
+                        # Crop transparent padding from text
+                        bbox = text_img.getbbox()
+                        if bbox:
+                            text_img = text_img.crop(bbox)
+                        
+                        # Ensure text image is RGBA
+                        if text_img.mode != 'RGBA':
+                            text_img = text_img.convert('RGBA')
+                        
+                        # Calculate position to center text on button
+                        text_x = (width - text_img.width) // 2
+                        text_y = (height - text_img.height) // 2
+                        
+                        # Create a temporary image for proper compositing
+                        temp_image = Image.new('RGBA', composite.size, (0, 0, 0, 0))
+                        temp_image.paste(text_img, (text_x, text_y))
+                        
+                        # Use alpha_composite instead of paste to handle transparency properly
+                        composite = Image.alpha_composite(composite, temp_image)
+                    
+                    btn_photo = ImageTk.PhotoImage(composite)
+                    button_images.append(btn_photo)  # Store reference
+                    
+                    # Create the button as a canvas image item
+                    btn_id = canvas.create_image(x, y, anchor=tk.CENTER, image=btn_photo)
+                    
+                    # Make it clickable
+                    canvas.tag_bind(btn_id, "<Button-1>", lambda e: command())
+                    canvas.tag_bind(btn_id, "<Enter>", lambda e: canvas.config(cursor="hand2"))
+                    canvas.tag_bind(btn_id, "<Leave>", lambda e: canvas.config(cursor=""))
+                    
+                    return btn_id
+                else:
+                    # Fallback - create a simple text button on canvas
+                    btn_id = canvas.create_rectangle(x-50, y-15, x+50, y+15, fill="#4A4A4A", outline="white")
+                    text_id = canvas.create_text(x, y, text=text, fill="white", font=("Arial", 9))
+                    
+                    canvas.tag_bind(btn_id, "<Button-1>", lambda e: command())
+                    canvas.tag_bind(text_id, "<Button-1>", lambda e: command())
+                    canvas.tag_bind(btn_id, "<Enter>", lambda e: canvas.config(cursor="hand2"))
+                    canvas.tag_bind(text_id, "<Enter>", lambda e: canvas.config(cursor="hand2"))
+                    canvas.tag_bind(btn_id, "<Leave>", lambda e: canvas.config(cursor=""))
+                    canvas.tag_bind(text_id, "<Leave>", lambda e: canvas.config(cursor=""))
+                    
+                    return btn_id
+            
+            # Create buttons directly on canvas
+            button_y = 440  # Y position for all buttons
+            
+            add_btn = create_button_on_canvas(295, button_y, "Add", add_mod,
+                                            self.state.get_modded_path(os.path.join("gfx", "interface", "unit_selectonly.dds")),
+                                            108, 26, flip_horizontal=True)
+            
+            remove_btn = create_button_on_canvas(405, button_y, "Remove", remove_mod,
+                                                self.state.get_modded_path(os.path.join("gfx", "interface", "unit_selectonly.dds")),
+                                                108, 26, flip_horizontal=False)
+            
+            up_btn = create_button_on_canvas(515, button_y, "Move up", move_up,
+                                            self.state.get_modded_path(os.path.join("gfx", "interface", "button_standard_111.tga")),
+                                            111, 34, flip_horizontal=False)
+            
+            down_btn = create_button_on_canvas(630, button_y, "Move down", move_down,
+                                            self.state.get_modded_path(os.path.join("gfx", "interface", "button_standard_111.tga")),
+                                            111, 34, flip_horizontal=False)
+            
+            apply_btn = create_button_on_canvas(70, button_y, "Apply", apply_selection,
+                                            self.state.get_modded_path(os.path.join("gfx", "interface", "button_standard_111.tga")),
+                                            111, 34, flip_horizontal=False)
+            
+            # Store the button images to prevent garbage collection
+            selection_dialog.button_images = button_images
+        
+        def clear_mods():
+            self.state.mod_names = []
+            self.state.config.default_mods = []
+            self.state.config.last_mods = []
             self.state.config.save()
             
             # CLEAR ALL MOD-SPECIFIC CACHES
@@ -5469,15 +5864,18 @@ class WarAnalyzerGUI:
             
             self._reload_assets()
             self._reload_cb_icons()
-            self.mod_label.config(text=f"Current Mod: {self.state.mod_name}")
+            self.mod_label.config(text="Current Mods: None")
         
-        mod_btn = self._create_button("Select Mod Folder", choose_mod)
+        mod_btn = self._create_button("Select Mods", choose_mods)
         self.canvas.create_window(30, 70, anchor=tk.NW, window=mod_btn)
         
-        clear_btn = self._create_button("Clear Mod", clear_mod)
+        clear_btn = self._create_button("Clear Mods", clear_mods)
         self.canvas.create_window(200, 70, anchor=tk.NW, window=clear_btn)
         
-        self.mod_label = tk.Label(self.root, text=f"Current Mod: {self.state.mod_name}", bg=BG_COLOR, font=("Arial", 10))
+        # Update mod label to show multiple mods
+        mod_display = ', '.join(self.state.mod_names) if self.state.mod_names else 'None'
+        self.mod_label = tk.Label(self.root, text=f"Current Mods: {mod_display}", 
+                                bg=BG_COLOR, font=("Arial", 10))
         self.canvas.create_window(30, 110, anchor=tk.NW, window=self.mod_label)
         
         # Custom checkboxes
@@ -5835,11 +6233,36 @@ class WarAnalyzerGUI:
         self._draw_tab_content("Tab2")
     
     def _reload_assets(self):
-        """Reload all assets after mod change."""
+        """Reload all assets after mod change with debug info."""        
+        # Clear image cache
         self.state.image_cache.clear()
+
+        # Clear all file parsing caches
+        self.state._localization_cache = None
+        self.state._government_cache_loaded = False
+        self.state._culture_mappings_cache = None
+        self.state._cb_types_cache = None
+        self.state._unit_types_cache = None
+        
         self._load_government_data()
+        
         self.layer_cache.build(self.tab_definitions)
+        
         self._draw_tab_content(self.current_tab)
+
+    def _reload_cb_icons(self):
+        """Reload CB icons with debug info."""      
+        # Clear the cache to force reload
+        if hasattr(self, '_cb_icons_loaded'):
+            self._cb_icons_loaded = False
+        if hasattr(self, '_cb_icons'):
+            self._cb_icons.clear()
+        if hasattr(self, 'cb_to_sprite'):
+            self.cb_to_sprite.clear()
+                # Reload the icons
+    
+        # Reload the icons
+        self._load_cb_icons()
 
     def _create_status_bar(self):
         """Create a status bar at the bottom of the window."""
@@ -6729,7 +7152,12 @@ def main():
         app.destroy()
         return
     
-    state = AppState(vic2_path=initial_path, mod_name="None")
+    # Load configuration to get any saved mods
+    config = AppConfig.load()
+    
+    # Create application state with updated parameter name
+    state = AppState(vic2_path=initial_path, mod_names=config.default_mods.copy() if config.default_mods else [])
+    
     gui = WarAnalyzerGUI(state)
     
     try:
