@@ -2,6 +2,7 @@
 
 import os
 import re
+import sys
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -114,11 +115,17 @@ class AppConfig:
     
     @classmethod
     def load(cls, path: str = None):
-        """Load configuration from JSON file with migration from single-mod format."""
-        # Use the same directory as the Python script
+        """Load configuration from JSON file with PyInstaller support."""
         if path is None:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            path = os.path.join(script_dir, "war_analyzer_config.json")
+            # Get the correct directory for PyInstaller
+            if getattr(sys, 'frozen', False):
+                # Running as .exe - use the executable directory
+                base_path = os.path.dirname(sys.executable)
+            else:
+                # Running as script - use the script directory
+                base_path = os.path.dirname(os.path.abspath(__file__))
+            
+            path = os.path.join(base_path, "war_analyzer_config.json")
         
         try:
             if os.path.exists(path):
@@ -146,6 +153,39 @@ class AppConfig:
             # Silently return default config if loading fails
             pass
         return cls()
+
+    def save(self, path: str = None):
+        """Save configuration to JSON file with PyInstaller support."""
+        if path is None:
+            if getattr(sys, 'frozen', False):
+                base_path = os.path.dirname(sys.executable)
+            else:
+                base_path = os.path.dirname(os.path.abspath(__file__))
+            
+            path = os.path.join(base_path, "war_analyzer_config.json")
+        
+        print(f"Attempting to save config to: {path}")  # Debug
+        print(f"Directory exists: {os.path.exists(os.path.dirname(path))}")  # Debug
+        print(f"Directory writable: {os.access(os.path.dirname(path), os.W_OK)}")  # Debug
+        
+        try:
+            config_dict = {
+                'recent_files': self.recent_files,
+                'window_position': self.window_position,
+                'default_mods': self.default_mods,
+                'auto_load_last': self.auto_load_last,
+                'last_mods': self.last_mods
+            }
+            
+            with open(path, 'w') as f:
+                json.dump(config_dict, f, indent=2)
+                
+            print(f"Config saved to: {path}")  # Debug output
+                
+        except Exception as e:
+            print(f"Error saving config: {e}")
+            # Silently fail if saving config fails
+            pass
     
     @classmethod
     def _migrate_from_single_mod(cls, data: Dict) -> Dict:
@@ -170,30 +210,7 @@ class AppConfig:
             del data['last_mod']
         
         return data
-    
-    def save(self, path: str = None):
-        """Save configuration to JSON file."""
-        if path is None:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            path = os.path.join(script_dir, "war_analyzer_config.json")
         
-        try:
-            config_dict = {
-                'recent_files': self.recent_files,
-                'window_position': self.window_position,
-                'default_mods': self.default_mods,
-                'auto_load_last': self.auto_load_last,
-                'last_mods': self.last_mods
-            }
-            
-            with open(path, 'w') as f:
-                json.dump(config_dict, f, indent=2)
-                
-        except Exception as e:
-            print(f"Error saving config: {e}")
-            # Silently fail if saving config fails
-            pass
-    
     def get_active_mods_display(self) -> str:
         """Get a display string for the active mods."""
         if not self.default_mods:
@@ -7540,44 +7557,37 @@ class CountryFilter:
 
 def main():
     """Main entry point for the application."""
-    app = tk.Tk()
-    app.withdraw()
-    
-    messagebox.showinfo("Select Victoria 2 Folder", "Please select your Victoria 2 installation folder.")
-    
-    initial_path = filedialog.askdirectory(title="Select Victoria 2 Folder")
-    if not initial_path:
-        messagebox.showerror("Error", "No folder selected. Exiting.")
-        app.destroy()
-        return
-    
-    # Load configuration to get any saved mods
-    config = AppConfig.load()
-    
-    # Create application state with updated parameter name
-    state = AppState(vic2_path=initial_path, mod_names=config.default_mods.copy() if config.default_mods else [])
-    
-    gui = WarAnalyzerGUI(state)
     
     try:
-        app.mainloop()
-    except Exception as e:
-        messagebox.showerror("Fatal Error", f"The application encountered an error:\n{e}")
-    finally:
-        # Force cleanup
-        try:
-            if 'gui' in locals():
-                gui.cleanup()
-        except:
-            pass
-        try:
-            app.destroy()
-        except:
-            pass
-        # Force exit to ensure process ends
-        import os
-        os._exit(0)
+        app = tk.Tk()
+        app.withdraw()
 
+        messagebox.showinfo("Select Victoria 2 Folder", "Please select your Victoria 2 installation folder.")
+        
+        initial_path = filedialog.askdirectory(title="Select Victoria 2 Folder")
+        
+        if not initial_path:
+            messagebox.showerror("Error", "No folder selected. Exiting.")
+            app.destroy()
+            return
+        
+        config = AppConfig.load()
+
+        state = AppState(vic2_path=initial_path, mod_names=config.default_mods.copy() if config.default_mods else [])
+
+        gui = WarAnalyzerGUI(state)
+        
+        # FIX: When GUI closes, destroy the root window
+        def on_gui_close():
+            app.destroy()
+        
+        gui.root.protocol("WM_DELETE_WINDOW", on_gui_close)
+        
+        app.mainloop()
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
