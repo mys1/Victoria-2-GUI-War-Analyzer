@@ -8,6 +8,8 @@ Choose your save file and the corresponding folder if the save is from a MOD. Th
 
 ![Settings](/images/settings.png)
 
+![Select mod](/images/selectmod.png)
+
 ## Show wars
 
 You will be presented with a list of the wars from the save file, because of instability issues it only shows 200 at a time. Wars highlighted in gold are the wars where the player is involved.
