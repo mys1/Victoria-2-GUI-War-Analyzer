@@ -25,11 +25,11 @@ You can select one or more countries from the list to filter out only to show wa
 
 Here we see the name of the war, original reason for the war. There is sadly not way in old games to find all the war goals that were added in a war. The dates of the war. The two original attackers and defenders shown in large, this is not automatically the same as who was war leader. A list of battles. Here the generation of big ship in the battle is represented.
 
-![War Details](/images/war_details.png)
+![War Details](/images/wardetails.png)
 
 If one or both nations are Great Powers at the moment in the save file they will be represented by another ring around the flag. The number on each battle indicates the inital army or fleet size in that battle. The green/red bar how many who survived.
 
-![War Details2](/images/war_details2.png)
+![War Details2](/images/wardetails2.png)
 
 ## Battle popup
 
