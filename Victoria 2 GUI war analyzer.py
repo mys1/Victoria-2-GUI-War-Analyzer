@@ -7557,37 +7557,65 @@ class CountryFilter:
 
 def main():
     """Main entry point for the application."""
+    print("DEBUG: Starting main function")
     
     try:
+        print("DEBUG: Creating Tk root")
         app = tk.Tk()
         app.withdraw()
-
+        print("DEBUG: Root created and hidden")
+        
+        print("DEBUG: Showing folder selection dialog")
         messagebox.showinfo("Select Victoria 2 Folder", "Please select your Victoria 2 installation folder.")
+        print("DEBUG: After first messagebox")
         
         initial_path = filedialog.askdirectory(title="Select Victoria 2 Folder")
+        print(f"DEBUG: Selected path: {initial_path}")
         
         if not initial_path:
+            print("DEBUG: No path selected, exiting")
             messagebox.showerror("Error", "No folder selected. Exiting.")
             app.destroy()
             return
         
+        print("DEBUG: Loading config")
         config = AppConfig.load()
-
-        state = AppState(vic2_path=initial_path, mod_names=config.default_mods.copy() if config.default_mods else [])
-
-        gui = WarAnalyzerGUI(state)
+        print("DEBUG: Config loaded")
         
-        # FIX: When GUI closes, destroy the root window
+        print("DEBUG: Creating AppState")
+        state = AppState(vic2_path=initial_path, mod_names=config.default_mods.copy() if config.default_mods else [])
+        print("DEBUG: AppState created")
+        
+        print("DEBUG: Creating WarAnalyzerGUI")
+        gui = WarAnalyzerGUI(state)
+        print("DEBUG: WarAnalyzerGUI created successfully")
+        
+        # FIX: Force process exit when GUI closes
         def on_gui_close():
-            app.destroy()
+            print("DEBUG: GUI closed, forcing process exit")
+            try:
+                gui.cleanup()
+            except:
+                pass
+            try:
+                app.destroy()
+            except:
+                pass
+            # Force the process to exit completely
+            import os
+            os._exit(0)
         
         gui.root.protocol("WM_DELETE_WINDOW", on_gui_close)
         
+        print("DEBUG: Starting mainloop")
         app.mainloop()
+        print("DEBUG: After mainloop - app closed normally")
         
     except Exception as e:
+        print(f"DEBUG: EXCEPTION: {e}")
         import traceback
         traceback.print_exc()
 
 if __name__ == "__main__":
     main()
+    print("DEBUG: Main function completed")
