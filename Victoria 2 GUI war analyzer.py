@@ -228,6 +228,7 @@ class AppState:
     vic2_path: Optional[str] = None
     mod_names: List[str] = field(default_factory=list)  # Changed from mod_name to mod_names
     save_file_path: str = "No save file selected"
+    text_renderer: Optional['TextRenderer'] = None
     
     # Data caching
     _wars_data: Optional[List['War']] = None
@@ -2214,7 +2215,7 @@ class WarAnalyzer:
 
 class ToolTip:
     """Create a tooltip for a given widget."""
-    def __init__(self, widget, text='', bg='#ffffe0', relief=tk.SOLID, borderwidth=1):
+    def __init__(self, widget, text='', bg='#ffffe0', relief=tk.SOLID, borderwidth=1, text_renderer=None):
         self.widget = widget
         self.text = text
         self.bg = bg
@@ -2223,6 +2224,7 @@ class ToolTip:
         self.tip_window = None
         self.id = None
         self.x = self.y = 0
+        self.text_renderer = text_renderer  # Store the text renderer
 
     def showtip(self, text, x, y):
         """Display text in tooltip window at specified coordinates."""
@@ -2230,17 +2232,35 @@ class ToolTip:
         if self.tip_window or not self.text:
             return
         
-      #  x = x + 10
-      # y = y + 10
-        
         self.tip_window = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{x}+{y}")
         
-        label = tk.Label(tw, text=self.text, justify=tk.LEFT,
-                        background=self.bg, relief=self.relief, 
-                        borderwidth=self.borderwidth, font=("Arial", 10))
-        label.pack(ipadx=1)
+        # Create a frame to hold the styled tooltip
+        frame = tk.Frame(tw, background=self.bg, relief=self.relief, 
+                        borderwidth=self.borderwidth)
+        frame.pack(ipadx=1, ipady=1)
+        
+        # Use the stored text_renderer if available
+        if self.text_renderer:
+            # render_cached_text already returns a PhotoImage
+            text_photo = self.text_renderer.render_cached_text(self.text, size=12, color="black", bold="True")
+            if text_photo:
+                label = tk.Label(frame, image=text_photo, background=self.bg)
+                label.pack()
+                
+                # Store reference to prevent garbage collection
+                tw._image_ref = text_photo
+            else:
+                # Fallback
+                label = tk.Label(frame, text=self.text, justify=tk.LEFT,
+                                background=self.bg, font=("Arial", 10))
+                label.pack()
+        else:
+            # Fallback if no text_renderer
+            label = tk.Label(frame, text=self.text, justify=tk.LEFT,
+                            background=self.bg, font=("Arial", 10))
+            label.pack()
 
     def hidetip(self):
         """Hide the tooltip."""
@@ -2263,8 +2283,14 @@ class FontManager:
     
     def __init__(self, state):
         self.state = state
+        self._current_mods = None  # Track current mods
+        self._initialize_fonts()
+    
+    def _initialize_fonts(self):
+        """Initialize or reinitialize fonts when mods change."""
+        self._current_mods = self.state.mod_names.copy() if self.state.mod_names else []
         
-        # Define relative paths for BMFont files - only the ones you need
+        # Define relative paths for BMFont files
         self.BMFONT_PATHS = {
             # Regular fonts
             10: os.path.join("gfx", "fonts", "Arial10.fnt"),
@@ -2330,7 +2356,20 @@ class FontManager:
             except Exception as e:
                 self.bmfonts[variant] = None
     
+    def check_mods_changed(self):
+        """Check if mods have changed and reload fonts if needed."""
+        current_mods = self.state.mod_names.copy() if self.state.mod_names else []
+        if current_mods != self._current_mods:
+            print(f"Mods changed from {self._current_mods} to {current_mods}, reloading fonts...")
+            self._initialize_fonts()
+            return True
+        return False
+    
     def render_text(self, text: str, size: int = 18, color = "black", bold: bool = False) -> Image.Image:
+        """Render text with mod change detection."""
+        # Check for mod changes before rendering
+        self.check_mods_changed()
+        
         try:
             # Map requested sizes to available font sizes
             available_sizes = [10, 12, 14, 15, 16, 18, 22, 32]
@@ -2443,6 +2482,116 @@ class FontManager:
     def tk_font_22_bold(self):
         return self.tk_fonts['22_bold']
 
+class EnhancedImageCache(ImageCache):
+    """Enhanced image cache with memory monitoring and automatic cleanup."""
+    
+    def __init__(self, max_size: int = 1000):
+        super().__init__(max_size)
+        self.memory_usage = 0
+        self.max_memory_mb = 500  # 500MB limit
+    
+    def estimate_memory_usage(self, image: Image.Image) -> int:
+        """Estimate memory usage of an image in bytes."""
+        if image.mode == 'RGBA':
+            bytes_per_pixel = 4
+        elif image.mode == 'RGB':
+            bytes_per_pixel = 3
+        else:
+            bytes_per_pixel = 1  # Conservative estimate
+        
+        return image.width * image.height * bytes_per_pixel
+    
+    def set(self, key: str, image: Image.Image):
+        """Set cache item with memory tracking."""
+        image_size = self.estimate_memory_usage(image)
+        
+        # Check if we're approaching memory limits
+        if self.memory_usage + image_size > self.max_memory_mb * 1024 * 1024:
+            self.clear()  # Aggressive cleanup
+        
+        super().set(key, image)
+        self.memory_usage += image_size
+    
+    def clear(self):
+        """Clear cache and reset memory usage."""
+        super().clear()
+        self.memory_usage = 0
+
+class MemoryManager:
+    """Manages application memory usage and performs cleanup."""
+    
+    def __init__(self, state: AppState):
+        self.state = state
+        self.last_cleanup_time = 0
+        self.cleanup_interval = 60  # Cleanup every 60 seconds
+    
+    def periodic_cleanup(self):
+        """Perform periodic memory cleanup."""
+        import time
+        import gc
+        
+        current_time = time.time()
+        if current_time - self.last_cleanup_time > self.cleanup_interval:
+            self.force_cleanup()
+            self.last_cleanup_time = current_time
+    
+    def force_cleanup(self):
+        """Force garbage collection and cache cleanup."""
+        import gc
+        
+        # Clear war image cache (most volatile)
+        self.state.war_image_cache.clear()
+        
+        # Clear image references that are no longer needed
+        if hasattr(self, 'image_refs'):
+            # Keep only UI elements, clear war-specific images
+            ui_images = [img for img in self.image_refs if any(ui_key in str(img) for ui_key in ['layer_', 'bg_', 'button_'])]
+            self.image_refs.clear()
+            self.image_refs.extend(ui_images)
+        
+        # Force garbage collection
+        gc.collect()
+
+class TextRenderer:
+    """Handles all text rendering through FontManager with caching."""
+    
+    def __init__(self, font_manager: FontManager):
+        self.font_manager = font_manager
+        self.text_cache = {}  # Cache for rendered text images
+    
+    def render_cached_text(self, text: str, size: int = 18, color: str = "black", 
+                          bold: bool = False) -> ImageTk.PhotoImage:
+        """Render text with caching to avoid duplicate renders."""
+        cache_key = f"{text}_{size}_{color}_{bold}"
+        
+        if cache_key in self.text_cache:
+            return self.text_cache[cache_key]
+        
+        # Render text using FontManager
+        text_image = self.font_manager.render_text(text, size, color, bold)
+        if text_image is None:
+            # Fallback: create empty image
+            text_image = Image.new("RGBA", (10, 10), (0, 0, 0, 0))
+        
+        # Crop transparent padding for proper positioning
+        bbox = text_image.getbbox()
+        if bbox:
+            text_image = text_image.crop(bbox)
+        
+        photo = ImageTk.PhotoImage(text_image)
+        self.text_cache[cache_key] = photo
+        return photo
+    
+    def create_text_element(self, canvas, text: str, x: int, y: int, 
+                          size: int = 18, color: str = "black", bold: bool = False,
+                          anchor: str = "nw") -> int:
+        """Create a text element on canvas with proper memory management."""
+        photo = self.render_cached_text(text, size, color, bold)
+        return canvas.create_image(x, y, anchor=anchor, image=photo)
+    
+    def clear_cache(self):
+        """Clear the text cache."""
+        self.text_cache.clear()
 
 class LayerCache:
     """Caches pre-rendered UI layers for each tab with dual cache system."""
@@ -2751,7 +2900,19 @@ class WarAnalyzerGUI:
         self.root.title("Victoria 2 GUI War Analyzer")
         self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
         self.root.resizable(False, False)
+        self.state.image_cache = EnhancedImageCache(max_size=800)
+        self.state.war_image_cache = EnhancedImageCache(max_size=400)
+        # Initialize memory manager
+        self.memory_manager = MemoryManager(self.state)
         
+        # Initialize text renderer
+        self.font_manager = FontManager(self.state)
+        self.text_renderer = TextRenderer(self.font_manager)
+        self.layer_cache = LayerCache(state)
+        
+        # Schedule periodic cleanup
+        self.root.after(30000, self._periodic_maintenance)  # Every 30 seconds
+
         # Use your existing mod-aware path resolution
         vic2_icon_path = self.state.get_modded_path("Victoria2.ico")
         if os.path.exists(vic2_icon_path):
@@ -2771,7 +2932,7 @@ class WarAnalyzerGUI:
         self.layer_cache = LayerCache(state)
         self.current_tab = "Tab1"
         self.image_refs = []
-        self.tooltip = ToolTip(self.canvas)
+        self.tooltip = ToolTip(self.canvas, text_renderer=self.text_renderer)
         self.war_image_cache = ImageCache(max_size=200)
         # Add this flag to track if auto-load has already run
         self.auto_load_executed = False
@@ -2797,6 +2958,21 @@ class WarAnalyzerGUI:
         # Auto-load last file and mod on startup if enabled
         if self.state.config.auto_load_last and not self.auto_load_executed:
             self._schedule_auto_load()
+
+    def _periodic_maintenance(self):
+        """Perform periodic maintenance tasks."""
+        try:
+            self.memory_manager.periodic_cleanup()
+            
+            # Clear text cache if it gets too large
+            if len(self.text_renderer.text_cache) > 1000:
+                self.text_renderer.clear_cache()
+            
+        except Exception as e:
+            print(f"Maintenance error: {e}")
+        
+        # Schedule next maintenance
+        self.root.after(30000, self._periodic_maintenance)
 
     def _schedule_auto_load(self):
         """Schedule auto-load to run once after a short delay."""
@@ -3688,7 +3864,8 @@ class WarAnalyzerGUI:
         
         # Main battle info
         main_text = f"{index + 1}. {battle_name}"
-        row_canvas.create_text(10, 12, text=main_text, anchor="w", font=("Arial", 9, "bold"))
+        text_photo = self.text_renderer.render_cached_text(main_text, size=12, color="black", bold=True)
+        row_canvas.create_image(10, 12, anchor="w", image=text_photo)
         
         # Get country tags and calculate total army sizes - FIXED: Use all units
         attacker_country_tag = battle.attacker.get('country', '?')
@@ -6184,8 +6361,9 @@ class WarAnalyzerGUI:
         
         # Country filter
         country_filter = CountryFilter(self.canvas, self.root, self.state, 
-                                    self.scrollbar_assets, self.image_refs, 
-                                    self._rebuild_and_refresh, self)
+                            self.scrollbar_assets, self.image_refs, 
+                            self._rebuild_and_refresh, self,
+                            self.text_renderer) 
         country_filter.create()
 
     def _rebuild_and_refresh(self):
@@ -7170,7 +7348,7 @@ class WarList:
 class CountryFilter:
     """Renders the country filter list."""
     
-    def __init__(self, parent_canvas, root, state, scrollbar_assets, image_refs, on_filter_change, gui):
+    def __init__(self, parent_canvas, root, state, scrollbar_assets, image_refs, on_filter_change, gui, text_renderer):
         self.parent_canvas = parent_canvas
         self.root = root
         self.state = state
@@ -7178,6 +7356,7 @@ class CountryFilter:
         self.image_refs = image_refs
         self.on_filter_change = on_filter_change
         self.gui = gui
+        self.text_renderer = text_renderer  # ADD THIS
         self.font_manager = FontManager(self.state)
         self.selected_bg = self._load_selected_background()
         self.unselected_bg = self._load_unselected_background()
@@ -7308,7 +7487,8 @@ class CountryFilter:
         else:
             display_text = country_name
 
-        row_canvas.create_text(text_x, text_y, text=display_text, anchor="w", font=("Arial", 9, "bold"))
+        text_photo = self.text_renderer.render_cached_text(display_text, size=12, color="black", bold=True)
+        row_canvas.create_image(text_x, text_y, anchor="w", image=text_photo)
         
         # Click handler
         def on_click(event):
