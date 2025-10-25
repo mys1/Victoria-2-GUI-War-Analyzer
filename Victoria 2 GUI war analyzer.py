@@ -1923,32 +1923,18 @@ class LocalizationParser:
     
     @staticmethod
     def parse_localization_files(state: AppState) -> Dict[str, str]:
-        """Parse localization with proper multiple mod load order support."""
+        """Parse localization - distinguish between country names, government names, and other entries."""
         if state._localization_cache is not None:
             return state._localization_cache
             
         country_names = {}
         loc_path = "localisation"
         
-        # Get all files in the correct load order (last mod wins)
+        # Get all files from both mod and base
         all_files = []
         
-        # BASE files first (lowest priority)
-        if state.vic2_path:
-            base_loc_path = Path(state.vic2_path) / loc_path
-            if base_loc_path.exists():
-                base_files = []
-                for root, dirs, files in os.walk(str(base_loc_path)):
-                    for file in files:
-                        if file.lower().endswith('.csv'):
-                            full_path = os.path.join(root, file)
-                            base_files.append(full_path)
-                base_files.sort()
-                all_files.extend(base_files)
-        
-        # MOD files in REVERSE order (so last mod in list has highest priority)
+        # MOD files first (so they can override base game)
         if state.mod_names and state.vic2_path:
-            # Process mods in the order they appear in mod_names (first mod = lowest priority)
             for mod_name in state.mod_names:
                 mod_loc_path = Path(state.vic2_path) / "mod" / mod_name / loc_path
                 if mod_loc_path.exists():
@@ -1961,11 +1947,24 @@ class LocalizationParser:
                     mod_files.sort()
                     all_files.extend(mod_files)
         
+        # BASE files second (lower priority)
+        if state.vic2_path:
+            base_loc_path = Path(state.vic2_path) / loc_path
+            if base_loc_path.exists():
+                base_files = []
+                for root, dirs, files in os.walk(str(base_loc_path)):
+                    for file in files:
+                        if file.lower().endswith('.csv'):
+                            full_path = os.path.join(root, file)
+                            base_files.append(full_path)
+                base_files.sort()
+                all_files.extend(base_files)
+        
         # Track what we've found for each category
         found_simple_country_tags = set()  # "ARY", "ARA" - basic country names
         found_government_tags = set()      # "ARY_absolute_monarchy" - government-specific names
         
-        # Process ALL files in order (later files override earlier ones)
+        # Process ALL files in order
         for file_path in all_files:
             try:
                 encodings = ['utf-8-sig', 'latin-1', 'cp1252', 'iso-8859-1', 'utf-8']
@@ -2026,30 +2025,31 @@ class LocalizationParser:
                     # CATEGORY 3: Everything else (parties, adjectives, etc.)
                     
                     if is_simple_country_tag:
-                        # Simple country name - ALWAYS override (last mod wins)
-                        country_names[key] = value
-                        found_simple_country_tags.add(key)
-                        
-                        # Store lowercase version
-                        country_names[key.lower()] = value
+                        # Simple country name - FIRST MATCH WINS
+                        if key not in found_simple_country_tags:
+                            country_names[key] = value
+                            found_simple_country_tags.add(key)
+                            
+                            # Store lowercase version
+                            country_names[key.lower()] = value
                     
                     elif is_government_tag:
-                        # Government-specific country name - ALWAYS override (last mod wins)
-                        country_names[key] = value
-                        found_government_tags.add(key)
-                        
-                        # Store lowercase version
-                        country_names[key.lower()] = value
+                        # Government-specific country name - FIRST MATCH WINS per government type
+                        if key not in found_government_tags:
+                            country_names[key] = value
+                            found_government_tags.add(key)
+                            
+                            # Store lowercase version
+                            country_names[key.lower()] = value
                     
                     else:
-                        # Everything else (parties, adjectives, etc.) - ALWAYS override
+                        # Everything else (parties, adjectives, etc.) - ALWAYS STORE (last match wins)
                         country_names[key] = value
                         if key != key.lower():
                             country_names[key.lower()] = value
                         if '_' in key:
                             simplified_key = key.replace('_', '')
                             country_names[simplified_key] = value
-        
         state._localization_cache = country_names
         return country_names
     
